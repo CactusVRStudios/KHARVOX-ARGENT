@@ -1,0 +1,5 @@
+#version 450
+layout(local_size_x=1,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) buffer Shared {uint x,y,z,counter;} data;
+layout(set=0,binding=1,rgba8) uniform writeonly image2D exposure;
+void main(){atomicAdd(data.counter,1u);if(all(equal(gl_GlobalInvocationID,uvec3(0))))imageStore(exposure,ivec2(0),vec4(0,0,0,.5));}

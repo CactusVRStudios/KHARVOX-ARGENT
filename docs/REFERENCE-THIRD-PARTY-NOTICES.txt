@@ -1,0 +1,121 @@
+# Third-party notices
+
+Original KHARVOX code is offered under the MIT License. The following vendored or externally linked interface headers and runtime binaries retain their own licenses and copyright notices; the KHARVOX license does not relicense those third-party files.
+
+## Khronos OpenXR-SDK headers and loader
+
+- Upstream: KhronosGroup/OpenXR-SDK
+- Source revision: `57af7fc61f9f2d492580cb28aab6d0ea59d8d417`
+- Release: `release-1.1.62`
+- Included subset: `third-party/openxr-sdk/include/openxr` and the official x64 loader at `third-party/openxr-sdk/bin/x64/openxr_loader.dll`
+- Loader version: `1.1.62.0`
+- Loader SHA-256: `5A2B18579A8647EF4DD79AAD807AF143AFEE45A1D58DEA2186EE22A96DD84516`
+- Rebuild configuration: x64 Release, `BUILD_LOADER=ON`, `DYNAMIC_LOADER=ON`, tests and API layers disabled
+- License identifiers on the included headers and loader sources: `Apache-2.0 OR MIT`
+- Copyright: The Khronos Group Inc.
+
+The Apache License 2.0 text is retained as `third-party/openxr-sdk/LICENSE`. KHARVOX redistributes the headers and loader under the Apache-2.0 option.
+
+## Khronos Vulkan-Headers
+
+- Upstream: KhronosGroup/Vulkan-Headers
+- Source revision: `b51f6b865c18fc5b33990d12f75e8dfd672cede6`
+- Included subset: five Windows/Vulkan layer headers under `third-party/vulkan-headers/include/vulkan` and twelve transitively required codec interface headers under `third-party/vulkan-headers/include/vk_video`
+- License identifiers on the included headers: `Apache-2.0 OR MIT`
+- Copyright holders include The Khronos Group Inc., Valve Corporation, and LunarG, Inc., as identified in the individual files.
+
+The upstream license summary is retained as `third-party/vulkan-headers/LICENSE.md`. KHARVOX redistributes these dual-licensed headers under the Apache-2.0 option; the Apache License 2.0 text retained with the OpenXR headers applies to that option.
+
+## AMD FidelityFX Super Resolution 1.0.2
+
+- Upstream: `GPUOpen-Effects/FidelityFX-FSR`
+- Source revision / release: `a21ffb8f6c13233ba336352bdff293894c706575` / `v1.0.2`
+- Included files: `third-party/fsr1/ffx_a.h`, `third-party/fsr1/ffx_fsr1.h`, and `third-party/fsr1/LICENSE`
+- Repository-file SHA-256 (`ffx_a.h`): `F60E2722FCD13989523B9164D776AB382B3692791767F3BF8BB19967F763F3FB`
+- Repository-file SHA-256 (`ffx_fsr1.h`): `93C3922362EA7FC99CBCC698CA30C98DE4F8C246D1FBB0B09E015DDEF38CE3A5`
+- Generated EASU SPIR-V SHA-256: `3A47843DB68492BC48A066BB272CD803BE3BE8599ADAE500389C16E414355911`
+- Generated RCAS SPIR-V SHA-256: `2E30697AC4F767D38FA6186FB903D7CB4A14B5370E7D163389492AAAB97FD666`
+- License: MIT; Copyright (c) 2021 Advanced Micro Devices, Inc.
+
+The upstream headers are retained with their notices; only line endings are normalized by the project workspace. `src/fsr/Fsr1Pass.comp` supplies KHARVOX's Vulkan resources, bounds checks, and sRGB handoff around the official EASU and RCAS functions. The upstream MIT text is retained as `third-party/fsr1/LICENSE`.
+
+## NVIDIA Optical Flow API headers
+
+Included files:
+
+- `archive/vendor/nvidia-optical-flow/include/nvOpticalFlowCommon.h`
+- `archive/vendor/nvidia-optical-flow/include/nvOpticalFlowVulkan.h`
+
+Copyright (c) 2018-2023 and 2022-2023 NVIDIA Corporation, respectively. Both headers contain and retain the following permission notice:
+
+> Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+>
+> The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+>
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+These historical headers are archived with their notices. The current runtime does not use Optical Flow or load nvofapi64.dll.
+
+## cgltf 1.15
+
+- Upstream: `jkuhlmann/cgltf`
+- Source revision: `85cd62382dfea638278962690cf515023f33ed00`
+- Included files: `third-party/cgltf/cgltf.h` and `third-party/cgltf/LICENSE`
+- `cgltf.h` SHA-256: `EFB169DEE911696B5D35FC8E3F7EA0C56D679DEBC529EBA9CA6AA6443BA9D5E9`
+- License: MIT; Copyright (c) 2018-2021 Johannes Kuhlmann
+
+KHARVOX uses cgltf only to decode the trusted static GLB hand assets shipped
+with the project. It can also bake a selected rigged fallback scene into a
+static vertex pose at load time. The loader does not accept game-downloaded or
+network content.
+
+## Optional bHaptics SDK2 runtime
+
+KHARVOX contains an original interoperability bridge that can dynamically load the proprietary `bhaptics_library.dll` from the bridge executable's own directory or the user's local `%LOCALAPPDATA%/KHARVOX/bhaptics` SDK installation selected by the launcher. The DLL, bHaptics Player, SDK credentials, device data, and bHaptics assets are not included in this source repository.
+
+The bridge ABI follows the official `bhaptics/tact-csharp2` wrapper and `bhaptics/mfc-sample` SDK2 header. Distribution of `bhaptics_library.dll` is governed by bHaptics' terms and requires separate authorization. KHARVOX packages must omit that DLL until the project owner has documented express distribution permission.
+
+## PSVR2 Toolkit v1 CAPI loader and external source link
+
+- Upstream: `BnuuySolutions/PSVR2Toolkit`
+- CAPI contract pinned from `main`: `339f2eb4dff01f05bae1a3ae5b8629a345507e2b`
+- Official binary release: `v1.0.0-experimental-1`
+- Release commit: `9e24e6ef475660481e8b46366aaa3cb24d0b4fde`
+- Official asset: `CAPIApps-Windows-v1.0.0-experimental-1.zip`
+- Asset SHA-256: `9D9058C0A2F186561CED05D9A40284C0451329FCA6DF999AA6A1E76A42EEDA74`
+- Included official file: `third-party/psvr2-toolkit/psvr2_toolkit_capi_loader.dll`
+- Loader SHA-256: `E366143796FBB90EDCB5CFB61AFB05C7BAA3E27EBAABE209BD7DF16A3ADCED16`
+- Upstream license: MIT; Copyright (c) 2026 Bnuuy Solutions
+
+The upstream MIT text is retained unchanged as `third-party/psvr2-toolkit/LICENSE`. The official loader source is unchanged between the published release commit and the pinned `main` revision. KHARVOX includes no `psvr2_toolkit_capi.dll`, Toolkit driver, `libcrossipc.dll`, legacy IPC server, SDL runtime, CAPI test executable, or copied trigger ABI header.
+
+The PSVR2 bridge is compiled against the official Toolkit CAPI headers through the `tools/PSVR2Toolkit` Git submodule. KHARVOX stores only the external repository URL and pinned commit; the linked Toolkit source remains governed by its upstream notices and terms.
+
+## Experimental native stereo adapter (r136)
+
+The native stereo render implementation derives from the supplied doomvr stereo
+renderer, copyright (c) 2026 dbkni, under the MIT License. Its notice is preserved
+in `src/native/upstream/LICENSE`. Ordered hook fragments, matrix mathematics,
+resource tracking and diagnostics are retained to preserve their dependencies.
+The KHARVOX adapter replaces presentation/session ownership and the final-pass
+entry assumption; it does not load doomvr.dll or its injector/OpenXR context.
+The included RenderDoc API header retains its own MIT copyright notice.
+
+MinHook v1.3.4, revision `c3fcafdc10146beb5919319d0683e44e3c30d537`, is statically
+linked for the experimental engine hooks. Its license and source notices are
+preserved under `third-party/minhook`. No MinHook DLL is needed at runtime.
+
+The imported RenderDoc application API header retains the MIT license and
+copyright (c) 2015-2026 Baldur Karlsson. Its full notice is included in
+`src/native/upstream/RENDERDOC-LICENSE.txt` and in the runtime package.
+
+
+SFS external shader-profile provenance
+https://github.com/helifax/Vk3DVision-Public
+Original provider author: Octavian Mihai Vasilovici (Helifax).
+KHARVOX implements its own Vulkan/OpenXR runtime and does not load the provider DLL.
+Local SFS packages still use compiled replacements from the user-supplied DOOM
+shader profile. These are not part of this source distribution. Compiler
+transformations and AMD support do not establish that these profiles were
+independently authored.
+KHARVOX is not endorsed by the original author.

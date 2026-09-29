@@ -1,0 +1,34 @@
+#pragma once
+#include <vulkan/vulkan.h>
+struct FsrDispatch {
+ PFN_vkAllocateDescriptorSets allocateDescriptorSets{};
+ PFN_vkAllocateMemory allocateMemory{};
+ PFN_vkBindImageMemory bindImageMemory{};
+ PFN_vkCmdBindDescriptorSets cmdBindDescriptorSets{};
+ PFN_vkCmdBindPipeline cmdBindPipeline{};
+ PFN_vkCmdCopyImage cmdCopyImage{};
+ PFN_vkCmdDispatch cmdDispatch{};
+ PFN_vkCmdPipelineBarrier cmdPipelineBarrier{};
+ PFN_vkCmdPushConstants cmdPushConstants{};
+ PFN_vkCreateComputePipelines createComputePipelines{};
+ PFN_vkCreateDescriptorPool createDescriptorPool{};
+ PFN_vkCreateDescriptorSetLayout createDescriptorSetLayout{};
+ PFN_vkCreateImage createImage{};
+ PFN_vkCreateImageView createImageView{};
+ PFN_vkCreatePipelineLayout createPipelineLayout{};
+ PFN_vkCreateSampler createSampler{};
+ PFN_vkCreateShaderModule createShaderModule{};
+ PFN_vkDestroyDescriptorPool destroyDescriptorPool{};
+ PFN_vkDestroyDescriptorSetLayout destroyDescriptorSetLayout{};
+ PFN_vkDestroyImage destroyImage{};
+ PFN_vkDestroyImageView destroyImageView{};
+ PFN_vkDestroyPipeline destroyPipeline{};
+ PFN_vkDestroyPipelineLayout destroyPipelineLayout{};
+ PFN_vkDestroySampler destroySampler{};
+ PFN_vkDestroyShaderModule destroyShaderModule{};
+ PFN_vkFreeMemory freeMemory{};
+ PFN_vkGetImageMemoryRequirements getImageMemoryRequirements{};
+ PFN_vkGetPhysicalDeviceMemoryProperties getPhysicalDeviceMemoryProperties{};
+ PFN_vkQueueSubmit queueSubmit{};
+ PFN_vkUpdateDescriptorSets updateDescriptorSets{};
+};

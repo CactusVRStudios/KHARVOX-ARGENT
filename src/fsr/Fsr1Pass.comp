@@ -1,0 +1,79 @@
+#version 450
+#extension GL_ARB_separate_shader_objects : enable
+#extension GL_GOOGLE_include_directive : enable
+
+// KHARVOX wrapper for AMD FidelityFX Super Resolution 1.0.2.
+// The implementation included below is the unmodified upstream FSR 1 shader
+// header pinned in Docs/THIRD_PARTY_NOTICES.txt. This wrapper only supplies Vulkan
+// resources, bounds checks, and the standard EASU/RCAS dispatch mapping.
+
+layout(push_constant) uniform FsrParameters {
+    uvec4 con0;
+    uvec4 con1;
+    uvec4 con2;
+    uvec4 con3;
+    uvec2 outputSize;
+    uvec2 padding;
+} parameters;
+
+vec3 kharvoxSrgbToLinear(vec3 color) {
+    bvec3 low = lessThanEqual(color, vec3(0.04045));
+    vec3 lower = color / 12.92;
+    vec3 upper = pow((color + 0.055) / 1.055, vec3(2.4));
+    return mix(upper, lower, low);
+}
+
+#define A_GPU 1
+#define A_GLSL 1
+#include "ffx_a.h"
+
+layout(set = 0, binding = 0) uniform sampler2D inputTexture;
+layout(set = 0, binding = 1, rgba8) uniform writeonly image2D outputTexture;
+
+#if defined(KHARVOX_FSR_EASU)
+    #define FSR_EASU_F 1
+    AF4 FsrEasuRF(AF2 p) { return textureGather(inputTexture, p, 0); }
+    AF4 FsrEasuGF(AF2 p) { return textureGather(inputTexture, p, 1); }
+    AF4 FsrEasuBF(AF2 p) { return textureGather(inputTexture, p, 2); }
+#elif defined(KHARVOX_FSR_RCAS)
+    #define FSR_RCAS_F 1
+    AF4 FsrRcasLoadF(ASU2 p) {
+        ASU2 maximum = ASU2(parameters.outputSize) - ASU2(1);
+        return texelFetch(inputTexture, clamp(p, ASU2(0), maximum), 0);
+    }
+    void FsrRcasInputF(inout AF1 r, inout AF1 g, inout AF1 b) {}
+#else
+    #error One KHARVOX FSR pass must be selected
+#endif
+
+#include "ffx_fsr1.h"
+
+void filterPixel(AU2 position) {
+    if (any(greaterThanEqual(position, parameters.outputSize))) return;
+#if defined(KHARVOX_FSR_EASU)
+    AF3 color;
+    FsrEasuF(color, position, parameters.con0, parameters.con1,
+        parameters.con2, parameters.con3);
+#else
+    AF3 color;
+    FsrRcasF(color.r, color.g, color.b, position, parameters.con0);
+    // Storage images cannot use an sRGB format. When the OpenXR destination
+    // is sRGB, store linear values so its final UNORM-to-sRGB blit recreates
+    // the display-encoded FSR result instead of applying gamma twice.
+    if (parameters.padding.x != 0u) color = kharvoxSrgbToLinear(color);
+#endif
+    imageStore(outputTexture, ASU2(position), AF4(color, 1.0));
+}
+
+layout(local_size_x = 64) in;
+void main() {
+    AU2 position = ARmp8x8(gl_LocalInvocationID.x)
+        + AU2(gl_WorkGroupID.x << 4u, gl_WorkGroupID.y << 4u);
+    filterPixel(position);
+    position.x += 8u;
+    filterPixel(position);
+    position.y += 8u;
+    filterPixel(position);
+    position.x -= 8u;
+    filterPixel(position);
+}

@@ -1,0 +1,4 @@
+Microsoft Visual C++ Runtime (x64)
+App-local runtime DLLs copied from the installed Visual Studio redistributable directory:
+VC/Redist/MSVC/14.51.36231/x64/Microsoft.VC145.CRT
+Copyright Microsoft Corporation. These components remain subject to Microsoft's applicable license terms.

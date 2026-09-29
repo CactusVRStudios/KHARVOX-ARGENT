@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory=$true)][ValidatePattern('^ARGENT-(Alpha-Test-r[0-9]{3}|Beta-[0-9]+\.[0-9]+(?:\.[0-9]+)?)$')][string]$ReleaseName,
+    [Parameter(Mandatory=$true)][ValidatePattern('^ARGENT-(Alpha-Test-r[0-9]{3}|Beta-[0-9]+\.[0-9]+(?:\.[0-9]+)?|[0-9]+\.[0-9]+(?:\.[0-9]+)?[a-z]?)$')][string]$ReleaseName,
     [switch]$IncludeSymbols,
     [switch]$PerformanceDiagnostics,
     [switch]$Clean = $true,

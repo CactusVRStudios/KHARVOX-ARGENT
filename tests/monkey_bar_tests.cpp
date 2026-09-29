@@ -15,6 +15,10 @@ void __fastcall stopFixture(void* owner,bool refillMeter) {++stops;stoppedOwner=
 bool __fastcall completionFixture(void*,unsigned short*,int) {++completions;return complete;}
 void __fastcall nativeCancelFixture(void*) {++cancellations;}
 namespace argent::camera {
+bool wallClimbView(float* axis) noexcept {
+ const float a[]{0,.8f,.6f,-1,0,0,0,-.6f,.8f};
+ std::memcpy(axis,a,sizeof(a));return ready;
+}
 bool monkeyBarPose(float* origin,float* axis,float* offset) noexcept {
  const float o[]{1,2,3},a[]{0,.8f,.6f,-1,0,0,0,-.6f,.8f};
  if(offset)std::memcpy(offset,o,sizeof(o));std::memcpy(origin,o,sizeof(o));std::memcpy(axis,a,sizeof(a));return ready;
@@ -38,6 +42,28 @@ int main(){try{
  check(monkey::originCaller(0x139a85f)&&!monkey::originCaller(0x1399bf7));
  void* owner=reinterpret_cast<void*>(0x1234);presentation::player=uintptr_t(owner);presentation::worldPresentation=true;
  monkey::nativeAxis=monkey::nativeOrigin=&nativeGetter;
+ // The level facing trigger must see head direction while native wall aim
+ // faces elsewhere. Its origin remains current native simulation position.
+ monkey::facingEnabled=true;nativeData[0]=-1;nativeData[1]=0;nativeData[2]=0;
+ check(monkey::axisFor(owner,0xd9d168)[2]==.6f);
+ ready=false;
+ check(monkey::originFor(owner,0xd9d185)[0]==-1);
+ check(monkey::originFor(owner,0xd9d185)==nativeData); // Consume once.
+ check(monkey::axisFor(owner,0xd9d168)==nativeData);
+ check(monkey::originFor(owner,0xd9d185)==nativeData);
+ ready=true;check(monkey::axisFor(owner,0xd9d168)!=nativeData);
+ check(monkey::originFor(reinterpret_cast<void*>(0x4567),0xd9d185)==nativeData);
+ check(monkey::axisFor(reinterpret_cast<void*>(0x4567),0xd9d168)==nativeData);
+ check(monkey::axisFor(owner,0xd9d168)!=nativeData);monkey::facing.tick-=101;
+ check(monkey::originFor(owner,0xd9d185)==nativeData);
+ presentation::worldPresentation=false;
+ check(monkey::axisFor(owner,0xd9d168)==nativeData);
+ presentation::worldPresentation=true;presentation::syncAttack=true;
+ check(monkey::axisFor(owner,0xd9d168)==nativeData);presentation::syncAttack=false;
+ monkey::facingEnabled=false;check(monkey::axisFor(owner,0xd9d168)==nativeData);
+ build::microsoftStore=true;
+ check(build::semanticRva(0xda8e38)==0xd9d168&&build::semanticRva(0xda8e55)==0xd9d185);
+ build::microsoftStore=false;std::memset(nativeData,0,sizeof(nativeData));
  monkey::Pose pose;check(monkey::capture(owner,pose)&&monkey::fresh(owner,pose));
  check(pose.origin[2]==3&&pose.axis[1]==.8f);
  monkey::nativeAxis=monkey::nativeOrigin=&nativeGetter;

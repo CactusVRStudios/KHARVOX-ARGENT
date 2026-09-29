@@ -13,7 +13,7 @@ struct WeaponConfig {
  bool automaticPresentation{true},cinematicsQuad{true},syncImmersive{true},movementImmersive{true},shoulderChainsaw{true},crouchEnabled{};
  bool legacyLayout{},twoHandEnabled{true},physicalGloryKill{true},bhapticsEnabled{},psvr2AdaptiveTriggers{};
  bool showHands{true};
- bool laserSight{};bool handsJump{true};
+ bool laserSight{};bool handsJump{true};bool handSmoothing{};
  bool cinematics3d{};
  // Model-local metres: forward, left, up. Shared by both dominant hands.
  XrVector3f weaponPivot{-.15f,0,0};
@@ -37,6 +37,7 @@ inline bool readWeaponConfig(std::istream& input,WeaponConfig& output){
   }
   else if(key=="show_hands"){int v;if(!(row>>v)||v<0||v>1)return false;next.showHands=v!=0;}
   else if(key=="hands_jump"){int v;if(!(row>>v)||v<0||v>1)return false;next.handsJump=v!=0;}
+  else if(key=="hand_smoothing"){int v;if(!(row>>v)||v<0||v>1)return false;next.handSmoothing=v!=0;}
   else if(key=="laser_sight"){int v;if(!(row>>v)||v<0||v>1)return false;next.laserSight=v!=0;}
   else if(key=="cinematics_3d"){int v;if(!(row>>v)||v<0||v>1)return false;next.cinematics3d=v!=0;}
   else if(key=="calibration_mode"){row>>next.calibrationMode;if(next.calibrationMode!="off"&&next.calibrationMode!="hands"&&next.calibrationMode!="weapon"&&next.calibrationMode!="support"&&next.calibrationMode!="hud")return false;}

@@ -23,6 +23,8 @@ std::atomic<uintptr_t> entryOwner{};
 std::atomic<ULONGLONG> entryTick{};
 struct Pose {uintptr_t owner{};ULONGLONG tick{};float origin[3]{};float axis[9]{};bool valid{};};
 thread_local Pose query,view;
+thread_local Pose facing;
+bool facingEnabled{};
 bool local(void* owner) {
  return owner&&uintptr_t(owner)==presentation::player.load()&&
   (presentation::worldPresentation.load()||presentation::gameplayInput.load())&&!presentation::syncAttack.load();
@@ -71,12 +73,37 @@ bool fresh(void* owner,const Pose& pose) {
  return local(owner)&&pose.valid&&pose.owner==uintptr_t(owner)&&GetTickCount64()-pose.tick<100;
 }
 const float* axisFor(void* owner,uintptr_t caller) {
+ if(facingEnabled&&caller==0xd9d168){
+  facing.valid=false;
+  // Level facing triggers need the displayed HMD direction even while the
+  // native wall-climb view is clamped. Keep the current simulation eye origin
+  // and all native target/contact/radius checks; never rotate climb physics.
+  if(local(owner)&&camera::wallClimbView(facing.axis)){
+   const auto eye=nativeOrigin(owner);
+   if(eye&&std::isfinite(eye[0])&&std::isfinite(eye[1])&&std::isfinite(eye[2])){
+    std::memcpy(facing.origin,eye,sizeof(facing.origin));
+    facing.owner=uintptr_t(owner);facing.tick=GetTickCount64();facing.valid=true;
+    if(extendedLogging()){
+     static std::atomic<ULONGLONG> reported{};const auto now=facing.tick;
+     auto previous=reported.load();
+     if(now-previous>=2000&&reported.compare_exchange_strong(previous,now))
+      log("ETERNAL_FACING_TRIGGER view=HMD origin=native forward="+std::to_string(facing.axis[0])+","+std::to_string(facing.axis[1])+","+std::to_string(facing.axis[2]));
+    }
+    return facing.axis;
+   }
+  }
+  return nativeAxis(owner);
+ }
  if(!axisCaller(caller))return nativeAxis(owner);
  // Query forward, up and both origins must come from the same snapshot.
  if(caller==0x139a842||caller==0x139a8f0)return fresh(owner,query)?query.axis:nativeAxis(owner);
  return capture(owner,view)?view.axis:nativeAxis(owner);
 }
 const float* originFor(void* owner,uintptr_t caller) {
+ if(facingEnabled&&caller==0xd9d185){
+  const bool use=fresh(owner,facing);facing.valid=false;
+  return use?facing.origin:nativeOrigin(owner);
+ }
  if(caller==0x139a79a)return capture(owner,query)?query.origin:nativeOrigin(owner);
  if(caller==0x1399c83||caller==0x139a295)return fresh(owner,view)?view.origin:nativeOrigin(owner);
  return originCaller(caller)&&fresh(owner,query)?query.origin:nativeOrigin(owner);
@@ -116,6 +143,9 @@ void acceptedBar(uintptr_t owner) {
 }
 bool install(unsigned char* base) {
  image=base;
+ facingEnabled=!std::memcmp(image+build::rva(0xd9d168)-6,"\xff\x90\x70\x04\x00\x00",6)&&
+  !std::memcmp(image+build::rva(0xd9d185)-6,"\xff\x90\x78\x04\x00\x00",6);
+ log("ETERNAL_FACING_TRIGGER contract="+std::to_string(facingEnabled)+" scope=local-view-getters native-trigger-conditions=preserved");
  const unsigned char getterTail[]={0x83,0x7a,8,0,0x41,0x0f,0x44,0xc0,0x48,3,0xc1,0xc3};
  for(auto rva:{uintptr_t(0x13e8950),uintptr_t(0x13e8970)}) {
   const auto p=image+build::rva(rva);

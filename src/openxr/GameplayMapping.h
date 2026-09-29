@@ -67,10 +67,11 @@ struct GameplayMapping {
   const auto dossierAction=dossier.update(raw.click[0],!revenant&&(world||(tutorial&&!dossierMenu))&&!wheelHeld&&!contextBlock[3],now);
   const auto useAction=useMelee.update(raw.click[1],(world||tutorialInput)&&!revenant&&!wheelHeld&&!contextBlock[8],now);
   if(tutorialInput){
-   // Native prompt buttons: A/B/X/Y, LT/RT, LB/RB. Never OR gameplay face
-   // actions into these: B to close must not also generate A/confirm.
+   // Keep native confirm/back, but retain the advertised VR weapon-mod
+   // shortcut: logical left Y means D-pad Up, not native Xbox Y.
+   // Never combine actions: B to close must not also generate A/confirm.
    button(routed[0],XINPUT_GAMEPAD_A);button(routed[1],XINPUT_GAMEPAD_B);
-   button(h.lower[0],XINPUT_GAMEPAD_X);button(h.upper[0],XINPUT_GAMEPAD_Y);
+   button(h.lower[0],XINPUT_GAMEPAD_X);button(h.upper[0],XINPUT_GAMEPAD_DPAD_UP);
    button(h.grip[0],XINPUT_GAMEPAD_LEFT_SHOULDER);button(h.grip[1],XINPUT_GAMEPAD_RIGHT_SHOULDER);
    p.bLeftTrigger=trigger(h.trigger[0]);p.bRightTrigger=trigger(h.trigger[1]);
    p.sThumbRX=p.sThumbRY=0;

@@ -34,6 +34,7 @@
 #include "openxr/ControllerInput.h"
 #include "openxr/GameplayMapping.h"
 #include "openxr/WeaponConfig.h"
+#include "openxr/HandSmoothing.h"
 #include "openxr/ShoulderChainsaw.h"
 #include "openxr/HapticBridge.h"
 #include "openxr/GripThresholdPolicy.h"

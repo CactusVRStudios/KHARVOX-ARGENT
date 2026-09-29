@@ -36,6 +36,8 @@ inline constexpr Address addresses[]={
 
  {0x13e8950,0x13ecf30},
  {0x13e8970,0x13ecf50},
+ {0xd9d168,0xda8e38}, // idTrigger_Facing forward getter return.
+ {0xd9d185,0xda8e55}, // idTrigger_Facing origin getter return.
  {0x1398d5d,0x139d33d},
  {0x1399bf7,0x139e1d7},
  {0x139a842,0x139ee22},

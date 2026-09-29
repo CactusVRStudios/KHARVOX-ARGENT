@@ -36,6 +36,8 @@ int main(){try{
   check(poll(false,true).wButtons&XINPUT_GAMEPAD_BACK,"Left layout tutorial Dossier blocked");
   physical={};tick+=250;poll(false,true);physical.upper[full?0:1]=true;tick+=10;
   check(poll(false,true).wButtons==XINPUT_GAMEPAD_B,"Left layout tutorial B mixed with gameplay Jump");
+  physical={};tick+=250;poll(false,true);physical.upper[full?1:0]=true;tick+=10;
+  check(poll(false,true).wButtons==XINPUT_GAMEPAD_DPAD_UP,"Left layout tutorial weapon mod swap missing or combined");
  }
  {
   GameplayMapping m;HandsInput h{};m.map(h,true,1);
@@ -234,13 +236,14 @@ int main(){try{
   h.stick[1]={};check(!m.map(h,false,32007,false,false,true).wButtons,"Tutorial Crucible stuck after release");
  }
  {
-  // Every native tutorial button must be reachable, even with world=true.
+  // Tutorial prompts retain confirm/back and the VR weapon-mod shortcut,
+  // even with a playable world camera behind the overlay.
   GameplayMapping m;HandsInput h;ULONGLONG tick=40000;
   auto readTutorial=[&](){return m.map(h,true,++tick,false,false,true);};
   readTutorial();WORD reached{};
   auto press=[&](bool& key,WORD expected){key=true;auto p=readTutorial();check(p.wButtons==expected,"Tutorial native button remapped or combined");reached|=p.wButtons;key=false;readTutorial();};
   press(h.lower[1],XINPUT_GAMEPAD_A);press(h.upper[1],XINPUT_GAMEPAD_B);
-  press(h.lower[0],XINPUT_GAMEPAD_X);press(h.upper[0],XINPUT_GAMEPAD_Y);
+  press(h.lower[0],XINPUT_GAMEPAD_X);press(h.upper[0],XINPUT_GAMEPAD_DPAD_UP);
   press(h.grip[0],XINPUT_GAMEPAD_LEFT_SHOULDER);press(h.grip[1],XINPUT_GAMEPAD_RIGHT_SHOULDER);
   for(auto pair:std::array<std::pair<XrVector2f,WORD>,4>{{{{0,1},XINPUT_GAMEPAD_DPAD_RIGHT},{{0,-1},XINPUT_GAMEPAD_RIGHT_SHOULDER},{{-1,0},XINPUT_GAMEPAD_DPAD_LEFT},{{1,0},XINPUT_GAMEPAD_DPAD_UP}}}){
    h.stick[1]=pair.first;auto p=readTutorial();check(p.wButtons==pair.second&&!p.sThumbRX&&!p.sThumbRY,"Tutorial directional shortcut missing");reached|=p.wButtons;h.stick[1]={};readTutorial();
@@ -250,7 +253,7 @@ int main(){try{
   tick+=300;readTutorial();h.click[0]=true;readTutorial();tick+=600;p=readTutorial();check(p.wButtons==XINPUT_GAMEPAD_BACK,"World camera blocked tutorial dossier");reached|=p.wButtons;h.click[0]=false;readTutorial();
   tick+=300;readTutorial();h.click[1]=true;p=readTutorial();check(p.wButtons==XINPUT_GAMEPAD_LEFT_THUMB,"Tutorial Use missing");reached|=p.wButtons;tick+=101;p=readTutorial();check(p.wButtons==XINPUT_GAMEPAD_RIGHT_THUMB,"Tutorial R3 missing");reached|=p.wButtons;h.click[1]=false;tick+=300;readTutorial();
   press(h.menu[0],XINPUT_GAMEPAD_START);
-  check(reached==0xf3ff,"Not all native tutorial buttons reachable");
+  check(reached==0x73ff,"Tutorial shortcut coverage changed");
   // B remains B through changes of the background camera; a new press is
   // required only at real tutorial entry/exit, not at a camera fluctuation.
   h.upper[1]=true;check(readTutorial().wButtons==XINPUT_GAMEPAD_B,"Tutorial B missing");

@@ -14,6 +14,7 @@ struct ControllerActions {
  input::GameplayMapping mapping;input::EternalMotionWheel motionWheel;
  std::array<kharvox::ControllerClickState,2> wheelClicks{};
  input::WeaponConfig configuration;input::TwoHandSupport support;
+ std::array<input::HandSmoothing,2> handFilters{};
  input::WeaponPoseCalibration weaponEditor;
  input::ShoulderChainsaw shoulder;input::CrucibleGesture physicalKill;kharvox::HandsJumpState handsJump;
  std::map<std::string,XrVector3f> supportProfiles;
@@ -27,7 +28,7 @@ struct ControllerActions {
   std::ifstream stream(file);if(!stream)return;
   std::string content((std::istreambuf_iterator<char>(stream)),{});if(content==configText)return;
   input::WeaponConfig candidate;std::istringstream rows(content);
-  if(input::readWeaponConfig(rows,candidate)){configuration=candidate;support={};mapping={};motionWheel={};wheelClicks={};shoulder={};physicalKill={};handsJump={};presentation::optionBits=(candidate.automaticPresentation?1u:0u)|(candidate.cinematicsQuad?2u:0u)|(candidate.syncImmersive?4u:0u)|(candidate.movementImmersive?8u:0u);log("XR_WEAPON_CONFIG pivotForward="+std::to_string(configuration.weaponPivot.x)+" pivotLeft="+std::to_string(configuration.weaponPivot.y)+" pivotUp="+std::to_string(configuration.weaponPivot.z)+" profile="+configuration.profile+" dominant="+(configuration.leftHanded?"left":"right")+" turn="+(configuration.snapTurn?"snap":"smooth")+" speed="+std::to_string(configuration.smoothSpeed)+" snap="+std::to_string(configuration.snapDegrees)+" physicalKill="+std::to_string(configuration.physicalGloryKill)+" punchSpeed="+std::to_string(configuration.glorySpeed)+" punchHands="+std::to_string(configuration.gloryHands)+" bhaptics="+std::to_string(configuration.bhapticsEnabled)+" psvr2="+std::to_string(configuration.psvr2AdaptiveTriggers));}
+  if(input::readWeaponConfig(rows,candidate)){configuration=candidate;support={};mapping={};motionWheel={};wheelClicks={};shoulder={};physicalKill={};handsJump={};handFilters={};presentation::optionBits=(candidate.automaticPresentation?1u:0u)|(candidate.cinematicsQuad?2u:0u)|(candidate.syncImmersive?4u:0u)|(candidate.movementImmersive?8u:0u);log("XR_WEAPON_CONFIG pivotForward="+std::to_string(configuration.weaponPivot.x)+" pivotLeft="+std::to_string(configuration.weaponPivot.y)+" pivotUp="+std::to_string(configuration.weaponPivot.z)+" profile="+configuration.profile+" dominant="+(configuration.leftHanded?"left":"right")+" turn="+(configuration.snapTurn?"snap":"smooth")+" speed="+std::to_string(configuration.smoothSpeed)+" snap="+std::to_string(configuration.snapDegrees)+" physicalKill="+std::to_string(configuration.physicalGloryKill)+" punchSpeed="+std::to_string(configuration.glorySpeed)+" punchHands="+std::to_string(configuration.gloryHands)+" bhaptics="+std::to_string(configuration.bhapticsEnabled)+" psvr2="+std::to_string(configuration.psvr2AdaptiveTriggers));}
   else log("XR_WEAPON_CONFIG rejected invalid configuration; keeping previous settings");
   if(configuration.cinematics3d)presentation::optionBits.fetch_or(16u);
   configText=content;
@@ -88,7 +89,7 @@ struct ControllerActions {
   if(ready){updateHaptics(false);updatePsvr2Triggers(false,false,false);}
   KharvoxPsvr2SubmitTrigger(kharvox::psvr2::offCommand(configuration.leftHanded,kharvox::psvr2::TriggerOffReason::SessionEnd));
   KharvoxPsvr2IpcRequestStop();KharvoxBhapticsIpcRequestStop();
-  input::clear();ready=false;heldGrip={};indexMenuHeld=false;syncCount=0;gripProfiles={};
+  input::clear();ready=false;heldGrip={};handFilters={};indexMenuHeld=false;syncCount=0;gripProfiles={};
   for(auto& h:aimSpace)if(h){XR(xrDestroySpace)(h);h=XR_NULL_HANDLE;}
   for(auto& h:gripSpace)if(h){XR(xrDestroySpace)(h);h=XR_NULL_HANDLE;}
   if(set){XR(xrDestroyActionSet)(set);set=XR_NULL_HANDLE;}
@@ -143,10 +144,10 @@ struct ControllerActions {
   }catch(const std::exception& e){log(std::string("XR_INPUT_FAILED ")+e.what());destroy();}
  }
  void update(XrTime time,bool focused,bool world){
-  if(!ready||!focused){if(ready){updateHaptics(false);updatePsvr2Triggers(false,false,false);}input::clear();heldGrip={};indexMenuHeld=false;syncCount=0;mapping={};motionWheel={};wheelClicks={};support={};shoulder={};physicalKill={};handsJump={};captureDown=false;return;}
+  if(!ready||!focused){if(ready){updateHaptics(false);updatePsvr2Triggers(false,false,false);}input::clear();heldGrip={};indexMenuHeld=false;syncCount=0;mapping={};motionWheel={};wheelClicks={};support={};shoulder={};physicalKill={};handsJump={};handFilters={};captureDown=false;return;}
   try{
    XrActiveActionSet active{set,XR_NULL_PATH};XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};sync.countActiveActionSets=1;sync.activeActionSets=&active;
-   if(XR(xrSyncActions)(session,&sync)!=XR_SUCCESS){updatePsvr2Triggers(false,false,false);input::clear();heldGrip={};indexMenuHeld=false;syncCount=0;motionWheel={};wheelClicks={};physicalKill={};handsJump={};return;}
+   if(XR(xrSyncActions)(session,&sync)!=XR_SUCCESS){updatePsvr2Triggers(false,false,false);input::clear();heldGrip={};indexMenuHeld=false;syncCount=0;motionWheel={};wheelClicks={};physicalKill={};handsJump={};handFilters={};return;}
    input::Snapshot sample;sample.tick=GetTickCount64();input::HandsInput controls;
    std::array<XrVector3f,2> velocity{};std::array<bool,2> velocityValid{},gripVelocityValid{};std::array<float,2> gripUpSpeed{};
    if(syncCount++%120==0)for(int h=0;h<2;++h){
@@ -182,6 +183,7 @@ struct ControllerActions {
     };
     locate(aim,aimSpace[h],sample.aim[h],sample.aimValid[h]);locate(grip,gripSpace[h],sample.grip[h],sample.gripValid[h]);
    }
+   const auto rawAim=sample.aim,rawGrip=sample.grip;
    refreshConfiguration();
    hud::setTutorialBindingLayout({configuration.leftHanded,configuration.leftHandSwapSticks,
     gripProfiles[0]==kharvox::GripControllerProfile::ValveIndex,gripProfiles[1]==kharvox::GripControllerProfile::ValveIndex});
@@ -195,6 +197,9 @@ struct ControllerActions {
    const auto demon=revenant::actor.load();sample.revenantActor=gameplay?demon:0;
    const bool calibrationActive=configuration.calibrationMode!="off";
    const bool captureSupport=configuration.captureSupport||configuration.calibrationMode=="support";
+   const bool smoothHands=configuration.handSmoothing&&gameplay&&!demon&&!calibrationActive&&!captureSupport&&
+    !presentation::nativeAnimation.load()&&!presentation::syncAttack.load()&&!presentation::scriptedMovement.load()&&!presentation::attachedWallClimb();
+   for(int h=0;h<2;++h)handFilters[h].update(sample.grip[h],sample.aim[h],sample.gripValid[h],sample.aimValid[h],time,smoothHands);
    hud::pollHandCalibration(gameplay&&configuration.calibrationMode=="hud"&&!presentation::syncAttack.load(),configuration.leftHanded);
    weaponEditor.load(runtimePath());
    weaponEditor.configure(configuration.profile,configuration.leftHanded,configuration.calibrationMode=="weapon",configuration.calibrationApply);
@@ -204,7 +209,7 @@ struct ControllerActions {
    const auto headResult=XR(xrLocateSpace)(space,localSpace,time,&headLocation);
    constexpr XrSpaceLocationFlags tracked=XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT|XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
    const bool headTracked=XR_SUCCEEDED(headResult)&&(headLocation.locationFlags&tracked)==tracked;
-    const bool saw=shoulder.update(headLocation.pose,sample.grip[primary],headTracked&&sample.gripValid[primary],gameplay&&!demon&&configuration.shoulderChainsaw&&!calibrationActive&&!captureSupport&&!controls.grip[off]&&!mapping.wheelHeld&&controls.stick[turnHand].y>=-.75f,controls.grip[primary],configuration.leftHanded,sample.tick);
+    const bool saw=shoulder.update(headLocation.pose,rawGrip[primary],headTracked&&sample.gripValid[primary],gameplay&&!demon&&configuration.shoulderChainsaw&&!calibrationActive&&!captureSupport&&!controls.grip[off]&&!mapping.wheelHeld&&controls.stick[turnHand].y>=-.75f,controls.grip[primary],configuration.leftHanded,sample.tick);
    if(shoulder.consumed)controls.grip[primary]=false;
    sample.managedTurn=gameplay;sample.smoothSpeed=configuration.smoothSpeed;sample.snapTurn=gameplay&&configuration.snapTurn;sample.snapDegrees=configuration.snapDegrees;sample.dominant=primary;sample.offhandMovement=configuration.offhandMovement;
    sample.weaponPivot=configuration.weaponPivot;
@@ -258,7 +263,7 @@ struct ControllerActions {
    // Selection follows the dominant physical grip; stick axes were already
    // routed by the left-hand layout and filtered by the menu context guard.
    const auto wheel=motionWheel.update(sample.pad,gameplay&&!demon&&mapping.wheelHeld,
-    configuration.leftHanded,configuration.leftHandSwapSticks,sample.grip[primary],
+    configuration.leftHanded,configuration.leftHandSwapSticks,rawGrip[primary],
     headTracked&&sample.gripValid[primary],headLocation.pose.orientation);
    wheelClicks[1-wheel.hand]={};
    if(!wheel.active||(!wheel.stickOwned&&!wheel.tracked))wheelClicks={};
@@ -267,8 +272,8 @@ struct ControllerActions {
    // Crucible limits physical punch gestures to the off-hand below. Explicit
    // stick-click Use/melee input must remain available for native interactions.
    static uint64_t crucibleSwingTick{};static std::string gestureProfile;
-   if(gestureProfile!=activeProfile){physicalKill={};handsJump={};crucibleSwingTick=0;gestureProfile=activeProfile;}
-   const auto gesture=physicalKill.update(time,gameplay&&!demon&&configuration.physicalGloryKill&&!calibrationActive&&!captureSupport&&!presentation::syncAttack.load()&&!(sample.pad.wButtons&XINPUT_GAMEPAD_RIGHT_SHOULDER)&&!shoulder.consumed,crucible,primary,configuration.gloryHands,configuration.glorySpeed,sample.aim,velocity,velocityValid);
+   if(gestureProfile!=activeProfile){physicalKill={};handsJump={};handFilters={};crucibleSwingTick=0;gestureProfile=activeProfile;}
+   const auto gesture=physicalKill.update(time,gameplay&&!demon&&configuration.physicalGloryKill&&!calibrationActive&&!captureSupport&&!presentation::syncAttack.load()&&!(sample.pad.wButtons&XINPUT_GAMEPAD_RIGHT_SHOULDER)&&!shoulder.consumed,crucible,primary,configuration.gloryHands,configuration.glorySpeed,rawAim,velocity,velocityValid);
    sample.manualWeaponTrigger=sample.pad.bRightTrigger>20;
    if(gesture.fire&&physicalKill.sword.pulse==time+200000000)crucibleSwingTick=sample.tick;
    sample.crucibleSwing=crucibleSwingTick;
@@ -286,6 +291,6 @@ struct ControllerActions {
    const bool fireDown=sample.pad.bRightTrigger>20;
    input::publish(sample);updatePsvr2Triggers(true,gameplay,fireDown);updateHaptics(true,gameplay,fireDown,sample.twoHand);
    if(extendedLogging()&&stereoSerial%300==0)log("XR_INPUT active="+std::to_string(sample.active)+" leftPose="+std::to_string(sample.aimValid[0])+" rightPose="+std::to_string(sample.aimValid[1])+" gamePolls="+std::to_string(input::getStateCalls.load())+" injected="+std::to_string(input::injectedCalls.load()));
-  }catch(const std::exception& e){input::clear();heldGrip={};indexMenuHeld=false;syncCount=0;motionWheel={};wheelClicks={};physicalKill={};handsJump={};log(std::string("XR_INPUT_SYNC_FAILED ")+e.what());}
+  }catch(const std::exception& e){input::clear();heldGrip={};indexMenuHeld=false;syncCount=0;motionWheel={};wheelClicks={};physicalKill={};handsJump={};handFilters={};log(std::string("XR_INPUT_SYNC_FAILED ")+e.what());}
  }
 } controllerActions;

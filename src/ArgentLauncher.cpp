@@ -2,6 +2,8 @@
 #include <cmath>
 #include <chrono>
 #include <windows.h>
+#include <winternl.h>
+#include <d3dkmthk.h>
 #include <commctrl.h>
 #include <commdlg.h>
 #include <objidl.h>
@@ -14,6 +16,7 @@
 #include <fstream>
 #include <string>
 #include "LauncherSettings.h"
+#include "MouseSession.h"
 #include "BuildFeatures.h"
 #include "RenderResolution.h"
 #include "DesktopMirrorResolution.h"
@@ -24,6 +27,45 @@ int runArgentVrIntro(const wchar_t* loaderPath);
 
 namespace {
 using argent::cleanRelease;
+
+bool runningUnderWine() {
+    // Proton and other Wine-based compatibility layers expose this ntdll export.
+    const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    return ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr;
+}
+
+// Query the active driver state, not the registry preference pending a reboot.
+// Missing APIs or unsupported queries are unknown, never evidence of enabled HAGS.
+bool hardwareGpuSchedulingEnabled() {
+    const HMODULE gdi = LoadLibraryExW(L"gdi32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!gdi) return false;
+    const auto enumerate = reinterpret_cast<PFND3DKMT_ENUMADAPTERS2>(GetProcAddress(gdi, "D3DKMTEnumAdapters2"));
+    const auto query = reinterpret_cast<PFND3DKMT_QUERYADAPTERINFO>(GetProcAddress(gdi, "D3DKMTQueryAdapterInfo"));
+    const auto close = reinterpret_cast<PFND3DKMT_CLOSEADAPTER>(GetProcAddress(gdi, "D3DKMTCloseAdapter"));
+    bool enabled = false;
+    if (enumerate && query && close) {
+        D3DKMT_ADAPTERINFO adapters[64]{};
+        D3DKMT_ENUMADAPTERS2 enumeration{};
+        enumeration.NumAdapters = 64;
+        enumeration.pAdapters = adapters;
+        if (enumerate(&enumeration) >= 0) {
+            for (ULONG i = 0; i < std::min(enumeration.NumAdapters, ULONG(64)); ++i) {
+                D3DKMT_WDDM_2_7_CAPS caps{};
+                D3DKMT_QUERYADAPTERINFO info{};
+                info.hAdapter = adapters[i].hAdapter;
+                info.Type = KMTQAITYPE_WDDM_2_7_CAPS;
+                info.pPrivateDriverData = &caps;
+                info.PrivateDriverDataSize = sizeof(caps);
+                if (query(&info) >= 0 && caps.HwSchEnabled) enabled = true;
+                D3DKMT_CLOSEADAPTER closing{};
+                closing.hAdapter = adapters[i].hAdapter;
+                close(&closing);
+            }
+        }
+    }
+    FreeLibrary(gdi);
+    return enabled;
+}
 
 void configureStereoDlss(std::map<std::wstring,std::wstring>& env,int mode){
     // DLSS can be toggled in-game. Every stereo runtime needs both histories,
@@ -58,7 +100,7 @@ enum : int {
     IdRenderer, IdCaptureShaders, IdSimulator, IdTurnMode, IdSnapAngle,
     IdMovement, IdDominantHand, IdLeftHandSwap, IdShowIntro, IdTwoHand, IdDisableAa, IdRenderScale,
     IdFsr, IdSmoothSpeed, IdPhysicalKill, IdKillSpeed, IdKillHands, IdAutomatic, IdSync, IdTraversal, IdShoulder,
-    IdHandsJump, IdVirtualGunstock, IdBhaptics, IdPsvr2Triggers,
+    IdHandSmoothing, IdHandsJump, IdVirtualGunstock, IdBhaptics, IdPsvr2Triggers,
     IdExtendedLogging, IdShowHands, IdCalibrationMode, IdCalibrationProfile, IdApplyCalibration, IdCalibrationFiles, IdPivotForward, IdPivotLeft, IdPivotUp,
     IdCinematics3d, IdGpuDiagnostics, IdDisableVrIntro, IdRenderingLogging, IdCredit, IdDesktopMirror, IdMirrorResolution, IdTabBase = 200
 };
@@ -66,9 +108,9 @@ enum : int {
 HWND tabButtons[7]{}, gameEdit{}, statusText{}, launchButton{};
 HWND renderScale{}, disableAa{}, captureShaders{}, simulator{}, turnMode{}, snapAngle{}, movement{}, dominantHand{},leftHandSwap{},leftHandLayoutLabel{};
 HWND showIntro{}, twoHand{}, virtualGunstock{}, bhaptics{}, psvr2Triggers{}, tabPages[7]{};
-HWND fsr{},smoothSpeed{},physicalKill{},killSpeed{},killHands{};
+HWND fsr{},fsrStatus{},smoothSpeed{},physicalKill{},killSpeed{},killHands{};
 HWND automatic{},syncImmersive{},traversal{},shoulder{};
-HWND extendedLogging{},showHands{},handsJump{},calibrationMode{},calibrationProfile{},weaponPivot[3]{};
+HWND extendedLogging{},showHands{},handsJump{},handSmoothing{},calibrationMode{},calibrationProfile{},weaponPivot[3]{};
 argent::calibration::ApplyCommand calibrationApplyCommand;bool calibrationApplyWaiting{};
 HWND cinematics3d{},gpuDiagnostics{};
 HWND disableVrIntro{}, renderingLogging{}, desktopMirror{}, mirrorResolution{};
@@ -372,6 +414,15 @@ bool usesSteamVrRuntime() {
     return manifest.find(L"steamvr") != std::wstring::npos
         || manifest.find(L"steamxr") != std::wstring::npos;
 }
+void updateRenderingAvailability(bool steamVr) {
+    EnableWindow(renderScale,!steamVr);
+    EnableWindow(fsr,!steamVr);
+    SetWindowTextW(fsrStatus,steamVr
+        ? L"SteamVR detected , adjust render scale within SteamVR."
+        : L"FSR is disabled at 100% res or higher. Turn off for DLSS usage.");
+    InvalidateRect(renderScale,nullptr,TRUE);
+    InvalidateRect(fsr,nullptr,TRUE);
+}
 std::filesystem::path steamVrRootFromManifest(const std::wstring& manifest) {
     if (manifest.empty()) return {};
     auto path = std::filesystem::path(manifest).parent_path();
@@ -467,7 +518,7 @@ HWND addCombo(HWND parent, int x, int y, int w, int h, int id,
     return c;
 }
 
-bool extraCheck(HWND h){return h==handsJump||h==dominantHand||h==desktopMirror||h==renderingLogging||h==disableVrIntro||h==cinematics3d||h==fsr||h==physicalKill||h==virtualGunstock||h==bhaptics||h==psvr2Triggers||h==extendedLogging||h==gpuDiagnostics||h==showHands;}
+bool extraCheck(HWND h){return h==handSmoothing||h==handsJump||h==dominantHand||h==desktopMirror||h==renderingLogging||h==disableVrIntro||h==cinematics3d||h==fsr||h==physicalKill||h==virtualGunstock||h==bhaptics||h==psvr2Triggers||h==extendedLogging||h==gpuDiagnostics||h==showHands;}
 void configureGpuDiagnostics(std::map<std::wstring,std::wstring>& env,bool enabled){env[L"ARGENT_GPU_DIAGNOSTICS"]=enabled?L"1":L"0";}
 std::wstring loggingArgument(){return isChecked(extendedLogging)?L" -ExtendedLogging":L"";}
 std::map<std::string,std::string> controlsSettings() {
@@ -478,6 +529,7 @@ std::map<std::string,std::string> controlsSettings() {
       {"show_hands",isChecked(showHands)?"1":"0"},
       {"laser_sight","0"},
       {"hands_jump",isChecked(handsJump)?"1":"0"},
+      {"hand_smoothing",isChecked(handSmoothing)?"1":"0"},
       {"cinematics_3d",isChecked(cinematics3d)?"1":"0"},
       {"weapon_pivot",std::to_string((selected(weaponPivot[0])-60)*.005f-.15f)+" "+std::to_string((selected(weaponPivot[1])-60)*.005f)+" "+std::to_string((selected(weaponPivot[2])-60)*.005f)},
       {"calibration_mode",calibrationModes[std::clamp(selected(calibrationMode),0,4)]},
@@ -605,6 +657,7 @@ void loadSettings(){
         }
         if(key=="show_hands")setChecked(showHands,value=="1");
         if(key=="hands_jump")setChecked(handsJump,value=="1");
+        if(key=="hand_smoothing")setChecked(handSmoothing,value=="1");
         if(key=="cinematics_3d")setChecked(cinematics3d,value=="1");
         if(key=="calibration_mode"){for(int i=0;i<5;++i)if(value==calibrationModes[i])SendMessageW(calibrationMode,CB_SETCURSEL,i,0);}
         if(key=="profile"){
@@ -665,6 +718,14 @@ void runLauncher(bool launch) {
         setStatus(L"Eternal executable not found. Select DOOMEternalx64vk.exe.");
         return;
     }
+    if (argent::mouse::gameRunning()) {
+        setStatus(L"DOOM Eternal is already running. Close it before starting a VR session.");
+        return;
+    }
+    if (!argent::mouse::repairSavedMouse()) {
+        setStatus(L"Cannot restore mouse settings. Check access to the DOOM Eternal Saved Games folder.");
+        return;
+    }
     const bool storeGame=microsoftStoreGame(gamePath);
     bool elevationKnown{};
     if (currentProcessElevated(elevationKnown)) {
@@ -711,6 +772,7 @@ void runLauncher(bool launch) {
     constexpr int mode = 1; // Stereo VR is the only launcher rendering mode.
     const auto runtimeManifest = activeOpenXRManifestW();
     const bool steamVr = usesSteamVrRuntime();
+    updateRenderingAvailability(steamVr);
     std::map<std::wstring,std::wstring> probeEnv;
     if (isChecked(simulator)) probeEnv[L"XR_RUNTIME_JSON"] = (root / L"logs/simulator-runtime.json").wstring();
     else if (steamVr) addSteamVrPathEnvironment(probeEnv, runtimeManifest);
@@ -843,13 +905,21 @@ void runLauncher(bool launch) {
     PROCESS_INFORMATION pi{};
     std::wstring command = quote(gamePath) + L" " + args;
     BOOL ok = CreateProcessW(gamePath, command.data(), nullptr, nullptr, FALSE,
-        CREATE_UNICODE_ENVIRONMENT, environment.data(), std::filesystem::path(gamePath).parent_path().c_str(), &si, &pi);
+        CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED, environment.data(), std::filesystem::path(gamePath).parent_path().c_str(), &si, &pi);
     if (!ok) {
         const auto error = GetLastError();
         auto message = L"Cannot start DOOM Eternal. win32=" + std::to_wstring(error);
         if (log) log << message << L"\n";
         setStatus(message.c_str());
         return;
+    }
+    if (!argent::mouse::startRestoreMonitor(pi.hProcess)) {
+        TerminateProcess(pi.hProcess,1);CloseHandle(pi.hThread);CloseHandle(pi.hProcess);
+        fail(L"Cannot start mouse restoration helper. DOOM was not started.");return;
+    }
+    if (ResumeThread(pi.hThread)==DWORD(-1)) {
+        TerminateProcess(pi.hProcess,1);CloseHandle(pi.hThread);CloseHandle(pi.hProcess);
+        fail(L"Cannot resume DOOM Eternal startup.");return;
     }
     auto startBridge=[&](const wchar_t* exe,const std::map<std::wstring,std::wstring>& extra){
         if(!std::filesystem::exists(runtime/exe))return;
@@ -944,7 +1014,7 @@ void createTabs(HWND hwnd) {
         {}, 0);
     for(int v=40;v<=200;v+=5){auto t=std::to_wstring(v)+L" %";SendMessageW(renderScale,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(t.c_str()));}
     SendMessageW(renderScale,CB_SETCURSEL,12,0);
-    addLabel(tabPages[0], L"FSR is disabled at 100% res or higher. Turn off for DLSS usage.", 24, 58, 730, 24, true);
+    fsrStatus=addLabel(tabPages[0], L"FSR is disabled at 100% res or higher. Turn off for DLSS usage.", 24, 58, 730, 24, true);
 
     fsr=addCheck(tabPages[0],L"FSR Upscaling",450,16,315,32,IdFsr);
     disableVrIntro=addCheck(tabPages[0],L"Disable VR Intro",395,98,330,32,IdDisableVrIntro);
@@ -983,6 +1053,7 @@ void createTabs(HWND hwnd) {
     SendMessageW(killSpeed,CB_SETCURSEL,9,0);
     addLabel(tabPages[2],L"Punch hand",395,160,130,24);
     killHands=addCombo(tabPages[2],540,152,210,150,IdKillHands,{L"Left",L"Right",L"Both"},2);
+    handSmoothing=addCheck(tabPages[2],L"Hand Smoothing",395,54,330,32,IdHandSmoothing);
     handsJump=addCheck(tabPages[2],L"Hands Jump",395,98,330,32,IdHandsJump,true);
 
     if(cleanRelease){
@@ -1041,6 +1112,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         addControl(hwnd, L"BUTTON", L"BROWSE", BS_OWNERDRAW | WS_TABSTOP, 708, 557, 150, 34, IdBrowse);
         createTabs(hwnd);
         loadSettings();
+        updateRenderingAvailability(usesSteamVrRuntime());
         launchButton = addControl(hwnd, L"BUTTON", L"PLAY", BS_OWNERDRAW | WS_TABSTOP,
             350, 614, 200, 48, IdLaunch);
         statusText = addLabel(hwnd, L"Ready", 42, 676, 635, 28, true);
@@ -1103,13 +1175,14 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 dis->hwndItem == simulator || extraCheck(dis->hwndItem);
             HBRUSH brush = CreateSolidBrush(check ? Panel : ((dis->itemState & ODS_SELECTED) ? RGB(210, 45, 8) : Accent));
             FillRect(dis->hDC, &dis->rcItem, brush); DeleteObject(brush);
-            SetBkMode(dis->hDC, TRANSPARENT); SetTextColor(dis->hDC, Text);
+            const bool disabled=!IsWindowEnabled(dis->hwndItem);
+            SetBkMode(dis->hDC, TRANSPARENT); SetTextColor(dis->hDC, disabled?Muted:Text);
             RECT textRect = dis->rcItem;
             if (check) {
                 RECT box{ textRect.left + 2, textRect.top + 6, textRect.left + 22, textRect.top + 26 };
-                HBRUSH boxBrush = CreateSolidBrush(isChecked(dis->hwndItem) ? Accent : Field);
+                HBRUSH boxBrush = CreateSolidBrush(isChecked(dis->hwndItem) ? (disabled?Muted:Accent) : Field);
                 FillRect(dis->hDC, &box, boxBrush); DeleteObject(boxBrush);
-                HBRUSH borderBrush = CreateSolidBrush(isChecked(dis->hwndItem) ? Accent : Border);
+                HBRUSH borderBrush = CreateSolidBrush(isChecked(dis->hwndItem) ? (disabled?Muted:Accent) : Border);
                 FrameRect(dis->hDC, &box, borderBrush); DeleteObject(borderBrush);
                 if (isChecked(dis->hwndItem)) {
                     HPEN pen = CreatePen(PS_SOLID, 2, Text);
@@ -1128,7 +1201,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             HBRUSH brush = CreateSolidBrush(Field); FillRect(dis->hDC, &dis->rcItem, brush); DeleteObject(brush);
             if (dis->itemID != static_cast<UINT>(-1)) {
                 wchar_t label[256]{}; SendMessageW(dis->hwndItem, CB_GETLBTEXT, dis->itemID, reinterpret_cast<LPARAM>(label));
-                SetBkMode(dis->hDC, TRANSPARENT); SetTextColor(dis->hDC, Text);
+                SetBkMode(dis->hDC, TRANSPARENT); SetTextColor(dis->hDC, IsWindowEnabled(dis->hwndItem)?Text:Muted);
                 RECT r = dis->rcItem; r.left += 10; DrawTextW(dis->hDC, label, -1, &r, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
                 if (dis->itemState & ODS_SELECTED) {
                     RECT line = dis->rcItem; line.right = line.left + 3;
@@ -1259,6 +1332,9 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR arguments, int show) {
+    constexpr wchar_t mouseRestoreArgument[]=L"--restore-mouse-handle ";
+    if(arguments&&std::wstring(arguments).find(mouseRestoreArgument)==0)
+        return argent::mouse::restoreAfterSession(arguments+wcslen(mouseRestoreArgument));
     wchar_t path[32768]{};
     GetModuleFileNameW(nullptr, path, 32768);
     root = std::filesystem::path(path).parent_path();
@@ -1318,6 +1394,31 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR arguments, int show) {
       try{
         auto checked=[](bool b,int line){if(!b)throw std::runtime_error("launcher integration test failed at line "+std::to_string(line));};
 #define require(...) checked((__VA_ARGS__),__LINE__)
+        {
+            const auto scaleBefore=selected(renderScale);const bool fsrBefore=isChecked(fsr);
+            updateRenderingAvailability(true);
+            require(!IsWindowEnabled(renderScale)&&!IsWindowEnabled(fsr));
+            wchar_t hint[256]{};GetWindowTextW(fsrStatus,hint,256);
+            require(std::wstring(hint)==L"SteamVR detected , adjust render scale within SteamVR.");
+            require(selected(renderScale)==scaleBefore&&isChecked(fsr)==fsrBefore);
+            updateRenderingAvailability(false);
+            require(IsWindowEnabled(renderScale)&&IsWindowEnabled(fsr));
+            GetWindowTextW(fsrStatus,hint,256);
+            require(std::wstring(hint)==L"FSR is disabled at 100% res or higher. Turn off for DLSS usage.");
+        }
+        {
+            std::string config="// in_mouse \"0\"\r\nin_mouse_speed \"0\"\r\nin_mouse \"0\"\r\nother \"7\"\r\n";
+            require(argent::mouse::enableSavedMouse(config));
+            require(config=="// in_mouse \"0\"\r\nin_mouse_speed \"0\"\r\nin_mouse \"1\"\r\nother \"7\"\r\n");
+            require(!argent::mouse::enableSavedMouse(config));
+            std::string utf16="\xff\xfe";
+            for(char c:std::string("in_mouse \"0\"\r\n")){utf16+=c;utf16+='\0';}
+            require(argent::mouse::enableSavedMouse(utf16));
+            require(utf16[22]=='1'&&utf16[23]=='\0');
+            std::string plain="in_mouse 0";require(argent::mouse::enableSavedMouse(plain)&&plain=="in_mouse 1");
+            std::string bom="\xef\xbb\xbfin_mouse \"0\"";
+            require(argent::mouse::enableSavedMouse(bom)&&bom=="\xef\xbb\xbfin_mouse \"1\"");
+        }
         require(SendMessageW(hwnd,WM_GETICON,ICON_BIG,0)&&SendMessageW(hwnd,WM_GETICON,ICON_SMALL,0));
         for(int size:{16,20,24,32,40,48,64,128,256}){
             auto icon=static_cast<HICON>(LoadImageW(instance,MAKEINTRESOURCEW(201),IMAGE_ICON,size,size,0));
@@ -1435,6 +1536,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR arguments, int show) {
         };
         require(GetParent(calibrationMode)==tabPages[4]&&isChecked(showHands));
         require(calibrationProfiles.back()=="sentinel_hammer"&&SendMessageW(calibrationProfile,CB_GETCOUNT,0,0)==calibrationProfiles.size());
+        require(GetParent(handSmoothing)==tabPages[2]&&!isChecked(handSmoothing));
+        setChecked(handSmoothing,true);writeControlsConfig();setChecked(handSmoothing,false);loadSettings();require(isChecked(handSmoothing));
+        setChecked(handSmoothing,false);writeControlsConfig();
         require(GetParent(handsJump)==tabPages[2]&&isChecked(handsJump));
         setChecked(handsJump,false);writeControlsConfig();setChecked(handsJump,true);loadSettings();require(!isChecked(handsJump));
         setChecked(handsJump,true);writeControlsConfig();
@@ -1485,7 +1589,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR arguments, int show) {
         writeControlsConfig();setChecked(extendedLogging,true);loadSettings();require(!isChecked(extendedLogging)&&loggingArgument().empty());
         settingsReady=true;
         // Real notifications must persist every control without PLAY or APPLY.
-        for(auto control:{dominantHand,handsJump,cinematics3d,fsr,physicalKill,virtualGunstock,bhaptics,psvr2Triggers,extendedLogging,gpuDiagnostics,showHands,disableAa,captureShaders,simulator}){
+        for(auto control:{dominantHand,handSmoothing,handsJump,cinematics3d,fsr,physicalKill,virtualGunstock,bhaptics,psvr2Triggers,extendedLogging,gpuDiagnostics,showHands,disableAa,captureShaders,simulator}){
             if(!control)continue;
             for(int repeat=0;repeat<2;++repeat){
                 const bool expected=!isChecked(control);
@@ -1540,6 +1644,23 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR arguments, int show) {
     }
     ShowWindow(hwnd, show);
     UpdateWindow(hwnd);
+    if (!argent::mouse::gameRunning()&&!argent::mouse::repairSavedMouse())
+        setStatus(L"Cannot restore mouse settings. Check access to the DOOM Eternal Saved Games folder.");
+    if (runningUnderWine()) {
+        MessageBoxW(hwnd,
+            L"Linux is not supported! Give it a try but Windows 11 or Temple OS is recommended!",
+            L"ARGENT - Compatibility notice", MB_OK | MB_ICONINFORMATION);
+    }
+    if (hardwareGpuSchedulingEnabled()) {
+        MessageBoxW(hwnd,
+            L"Hardware-accelerated GPU scheduling (HAGS) is enabled.\n\n"
+            L"We recommend turning it off when playing ARGENT.\n\n"
+            L"Open Windows Settings > System > Display > Graphics and turn off "
+            L"Hardware-accelerated GPU scheduling in the default or advanced graphics settings. "
+            L"Restart your PC for the change to take effect.\n\n"
+            L"You can continue using ARGENT with HAGS enabled.",
+            L"ARGENT - GPU scheduling recommendation", MB_OK | MB_ICONINFORMATION);
+    }
 
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {

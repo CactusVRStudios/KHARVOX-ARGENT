@@ -132,6 +132,12 @@ KHARVOX:ARGENT is an independent community project and is not affiliated with, e
 
 All trademarks and product names are property of their respective owners. A legally acquired installation of each supported game is required!
 
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/M7G028RQIE)
+
+
+
+
 ## Building from source
 
 This repository contains the ARGENT source code. The instructions below describe the Windows build and its required dependencies.

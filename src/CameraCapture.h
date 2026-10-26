@@ -56,7 +56,7 @@ class CameraCapture {
 public:
     MappedBuffers memory;
     static bool enabled();
-    bool projection(sfs::Matrix&,uint64_t maxAgeMs=0);
+    bool projection(sfs::Matrix&,uint64_t maxAgeMs=0,uint64_t* ageMs=nullptr);
     void layout(VkDescriptorSetLayout,const VkDescriptorSetLayoutCreateInfo*);
     void pipelineLayout(VkPipelineLayout,const VkPipelineLayoutCreateInfo*);
     void retirePipelineLayout(VkPipelineLayout);

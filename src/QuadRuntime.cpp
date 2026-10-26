@@ -9,6 +9,11 @@
 #include "openxr/EternalMotionWheel.h"
 #include "openxr/CrucibleGesture.h"
 #include "QuadRuntime.h"
+#include "EternalDlssHook.h"
+#include "framegen/FrameGeneration.h"
+#include "framegen/FrameClock.h"
+#include "framegen/EndpointOutput.h"
+#include "framegen/ExternalFramegen.h"
 #include "EternalCameraHook.h"
 #include "EternalPlayerHooks.h"
 #include "EternalPresentation.h"
@@ -71,6 +76,8 @@ HMODULE loader{};PFN_xrGetInstanceProcAddr get{};
 XrInstance instance{};XrSystemId system{};XrSession session{};XrSpace space{},localSpace{};XrSwapchain swapchain{};
 bool attempted{},running{},failed{},simulator{};VkDevice boundDevice{};Device device;
 bool enable2{};
+bool displayRefreshEnabled{};
+float headsetRefreshHz{};
 VkPhysicalDevice runtimeSelectedPhysical{};
 kharvox::OpenXRRuntimeKind runtimeKind{};
 std::atomic<PFN_vkGetInstanceProcAddr> runtimeNext{};
@@ -127,7 +134,14 @@ uint64_t steamVrNativePresentDeferrals{};
 bool steamFramePrepared{},steamFrameBegun{};
 XrFrameState steamPreparedFrame{XR_TYPE_FRAME_STATE};
 uint64_t steamPreparedFrames{},steamConsumedPreparedFrames{},steamRepeatedAcquires{},steamWaitCalls{},steamBeginCalls{},steamEndCalls{},steamOrderViolations{};
-struct StereoPending {bool begun{};sfs::FramePose pose{};input::Snapshot hands{};} stereoPending;
+struct StereoPending {bool begun{},waited{};sfs::FramePose pose{};input::Snapshot hands{};} stereoPending;
+fg::FrameWaitAhead framegenWait;
+fg::FrameClock framegenClock;
+fg::EndpointOutput framegenEndpoint;
+XrTime stereoDisplayTime{};
+double framegenBeginWaitMs{};
+double framegenBeginCallMs{};
+void stopFramegenClock();
 uint64_t stereoSerial{};
 XrTime referenceChangeTime{};
 QueueBridge bridge;
@@ -214,6 +228,7 @@ void startSession(Device& d,VkQueue q,uint32_t family,uint32_t index){
     XrSessionCreateInfo ci{XR_TYPE_SESSION_CREATE_INFO};ci.next=&binding;ci.systemId=system;
     log("XR_SESSION creating Vulkan binding family="+std::to_string(family)+" index="+std::to_string(index));
     check(XR(xrCreateSession)(instance,&ci,&session),"xrCreateSession");boundDevice=d.device;boundQueue=q;boundFamily=family;
+    if(displayRefreshEnabled){float hz{};if(XR_SUCCEEDED(XR(xrGetDisplayRefreshRateFB)(session,&hz))&&hz>0){headsetRefreshHz=hz;log("FRAMEGEN_DISPLAY physicalHz="+std::to_string(hz));}}
     {uint32_t n{};check(XR(xrEnumerateSwapchainFormats)(session,0,&n,nullptr),"pause image formats");
      std::vector<int64_t> formats(n);check(XR(xrEnumerateSwapchainFormats)(session,n,&n,formats.data()),"pause image formats");
      log(initializePauseBindings(formats)?"PAUSE_BINDINGS uploaded=1 pauseRootOnly=1":"PAUSE_BINDINGS unavailable; normal menu retained");}
@@ -260,12 +275,16 @@ void events(){
             const auto& change=*reinterpret_cast<XrEventDataReferenceSpaceChangePending*>(&event);
             if(change.session==session&&change.referenceSpaceType==XR_REFERENCE_SPACE_TYPE_LOCAL)referenceChangeTime=change.changeTime;
         }
+        if(displayRefreshEnabled&&event.type==XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB){
+            const auto& change=*reinterpret_cast<XrEventDataDisplayRefreshRateChangedFB*>(&event);
+            if(change.toDisplayRefreshRate>0){headsetRefreshHz=change.toDisplayRefreshRate;log("FRAMEGEN_DISPLAY physicalHz="+std::to_string(headsetRefreshHz));}
+        }
         if(event.type==XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED){
             auto& state=*reinterpret_cast<XrEventDataSessionStateChanged*>(&event);if(state.session!=session)continue;
             sessionState=state.state;log("XR_STATE="+std::to_string(state.state));
             if(state.state!=XR_SESSION_STATE_FOCUSED)input::clear();
             if(state.state==XR_SESSION_STATE_READY&&!running){XrSessionBeginInfo bi{XR_TYPE_SESSION_BEGIN_INFO};bi.primaryViewConfigurationType=XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;check(XR(xrBeginSession)(session,&bi),"xrBeginSession");running=true;}
-            if(state.state==XR_SESSION_STATE_STOPPING&&running){check(XR(xrEndSession)(session),"xrEndSession");running=false;}
+            if(state.state==XR_SESSION_STATE_STOPPING&&running){stopFramegenClock();check(XR(xrEndSession)(session),"xrEndSession");running=false;}
             if(state.state==XR_SESSION_STATE_EXITING||state.state==XR_SESSION_STATE_LOSS_PENDING)throw std::runtime_error("XR session exiting/lost");
         }
     }
@@ -278,7 +297,7 @@ bool initializeXRImpl(){
         if(!loader)throw std::runtime_error("OpenXR loader unavailable");get=reinterpret_cast<PFN_xrGetInstanceProcAddr>(GetProcAddress(loader,"xrGetInstanceProcAddr"));if(!get)throw std::runtime_error("xrGetInstanceProcAddr unavailable");
         uint32_t count=0;check(XR(xrEnumerateInstanceExtensionProperties)(nullptr,0,&count,nullptr),"XR extensions");
         std::vector<XrExtensionProperties> props(count,{XR_TYPE_EXTENSION_PROPERTIES});check(XR(xrEnumerateInstanceExtensionProperties)(nullptr,count,&count,props.data()),"XR extensions");
-        bool vulkan=false,vulkan2=false;for(auto& p:props){if(!strcmp(p.extensionName,XR_KHR_VULKAN_ENABLE_EXTENSION_NAME))vulkan=true;if(!strcmp(p.extensionName,XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME))vulkan2=true;}
+        bool vulkan=false,vulkan2=false;for(auto& p:props){if(!strcmp(p.extensionName,XR_KHR_VULKAN_ENABLE_EXTENSION_NAME))vulkan=true;if(!strcmp(p.extensionName,XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME))vulkan2=true;if(fg::requested()&&!strcmp(p.extensionName,XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME))displayRefreshEnabled=true;}
         runtimeKind=kharvox::classifyOpenXRRuntime(kharvox::activeOpenXRRuntimeManifest());
         auto path=kharvox::selectOpenXRVulkanPath(runtimeKind,false,vulkan,vulkan2);
         char forceSteamEnable1[8]{};
@@ -290,11 +309,12 @@ bool initializeXRImpl(){
         if(path==kharvox::OpenXRVulkanPath::None)throw std::runtime_error("No OpenXR Vulkan graphics extension available");
         enable2=path==kharvox::OpenXRVulkanPath::VulkanEnable2RuntimeManaged;
         const char* extension=enable2?XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME:XR_KHR_VULKAN_ENABLE_EXTENSION_NAME;
+        std::vector<const char*> extensions{extension};if(displayRefreshEnabled)extensions.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
         log(std::string("XR_VULKAN_PATH ")+extension);
         XrInstanceCreateInfo ci{XR_TYPE_INSTANCE_CREATE_INFO};
         strcpy_s(ci.applicationInfo.applicationName,"DOOM Eternal");
         strcpy_s(ci.applicationInfo.engineName,"idTech7");
-        ci.applicationInfo.apiVersion=XR_MAKE_VERSION(1,0,0);ci.enabledExtensionCount=1;ci.enabledExtensionNames=&extension;
+        ci.applicationInfo.apiVersion=XR_MAKE_VERSION(1,0,0);ci.enabledExtensionCount=uint32_t(extensions.size());ci.enabledExtensionNames=extensions.data();
         log(std::string("XR_APPLICATION_IDENTITY app=")+ci.applicationInfo.applicationName+" engine="+ci.applicationInfo.engineName);
         check(XR(xrCreateInstance)(&ci,&instance),"xrCreateInstance");
         XrSystemGetInfo si{XR_TYPE_SYSTEM_GET_INFO};si.formFactor=XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;check(XR(xrGetSystem)(instance,&si,&system),"xrGetSystem");
@@ -538,12 +558,13 @@ bool presentQuadImpl(Device& d,VkQueue q,uint32_t family,uint32_t index,const So
     return consumed;
 }
 bool presentQuad(Device& d,VkQueue q,uint32_t family,uint32_t index,const Source& source,uint32_t imageIndex,const VkPresentInfoKHR& present){
+    waitStereoOutput();
     auto frame=[&]{return presentQuadImpl(d,q,family,index,source,imageIndex,present);};
     return simulator?xrWorker().invoke(frame):frame();
 }
 void shutdownXRImpl(VkDevice d){
     std::lock_guard<std::recursive_mutex> guard(mutex);if(boundDevice!=d)return;
-    try{cancelStereoImpl();}catch(const std::exception& e){log(std::string("STEREO_SHUTDOWN_END_FAILED ")+e.what());}
+    try{stopFramegenClock();}catch(const std::exception& e){log(std::string("STEREO_SHUTDOWN_END_FAILED ")+e.what());}
     controllerActions.destroy();
     VK(vkDeviceWaitIdle)(d);copyTiming.shutdownAfterCompletion();diagnosticCopyTiming.shutdownAfterCompletion();bridge.destroy(device);destroySwapchain();releasePauseBindings();if(localSpace)XR(xrDestroySpace)(localSpace);if(space)XR(xrDestroySpace)(space);if(session)XR(xrDestroySession)(session);
     localSpace=XR_NULL_HANDLE;
@@ -552,7 +573,7 @@ void shutdownXRImpl(VkDevice d){
     log("XR_SHUTDOWN");
     runtimeDevice=VK_NULL_HANDLE;runtimeGdpa=nullptr;
 }
-void shutdownXR(VkDevice d){if(simulator)xrWorker().invoke([&]{shutdownXRImpl(d);});else shutdownXRImpl(d);
+void shutdownXR(VkDevice d){waitStereoOutput();if(simulator)xrWorker().invoke([&]{shutdownXRImpl(d);});else shutdownXRImpl(d);
     if(runtimeDevice.load()==d){runtimeDevice=VK_NULL_HANDLE;runtimeGdpa=nullptr;}}
 }
 

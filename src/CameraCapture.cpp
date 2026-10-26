@@ -111,7 +111,7 @@ void CameraCapture::submitProbe(uint32_t count,const VkCommandBuffer* buffers){
   }
  }
 }
-bool CameraCapture::projection(sfs::Matrix& result,uint64_t maxAgeMs){std::shared_lock<std::shared_mutex> guard(mutex);if(!liveProjectionValid||(maxAgeMs&&GetTickCount64()-liveProjectionTick>maxAgeMs))return false;result=liveProjection;return true;}
+bool CameraCapture::projection(sfs::Matrix& result,uint64_t maxAgeMs,uint64_t* ageMs){std::shared_lock<std::shared_mutex> guard(mutex);if(ageMs)*ageMs=liveProjectionValid?GetTickCount64()-liveProjectionTick:UINT64_MAX;if(!liveProjectionValid||(maxAgeMs&&GetTickCount64()-liveProjectionTick>maxAgeMs))return false;result=liveProjection;return true;}
 void CameraCapture::layout(VkDescriptorSetLayout l,const VkDescriptorSetLayoutCreateInfo* ci){std::unique_lock<std::shared_mutex> guard(mutex);auto& item=layouts[l];item.dynamic.clear();for(uint32_t i=0;i<ci->bindingCount;++i){auto& b=ci->pBindings[i];if(b.descriptorType==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC||b.descriptorType==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)for(uint32_t j=0;j<b.descriptorCount;++j)item.dynamic.push_back({b.binding,j});}std::sort(item.dynamic.begin(),item.dynamic.end());}
 void CameraCapture::allocate(const VkDescriptorSetAllocateInfo* ci,const VkDescriptorSet* out){std::unique_lock<std::shared_mutex> guard(mutex);for(uint32_t i=0;i<ci->descriptorSetCount;++i){sets[out[i]].clear();probeImages.erase(out[i]);setLayouts[out[i]]=ci->pSetLayouts[i];setPools.insert(ci->descriptorPool,out[i]);}}
 void CameraCapture::retireSets(uint32_t n,const VkDescriptorSet* out){std::unique_lock<std::shared_mutex> guard(mutex);for(uint32_t i=0;i<n;++i){sets.erase(out[i]);probeImages.erase(out[i]);setLayouts.erase(out[i]);setPools.erase(out[i]);}}

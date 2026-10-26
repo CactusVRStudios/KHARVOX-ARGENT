@@ -6,7 +6,8 @@
 #include <iostream>
 #include <stdexcept>
 #include <vector>
-void require(bool b){if(!b)throw std::runtime_error("Build profile contract failed");}
+void requireAt(bool b, int line){if(!b)throw std::runtime_error("Build profile contract failed at line " + std::to_string(line));}
+#define require(condition) requireAt((condition), __LINE__)
 int main(){try{
  using namespace argent;
  for(bool store:{false,true}){
@@ -17,6 +18,7 @@ int main(){try{
   for(auto a:build::addresses){
    if(a.steam<0x2a00000&&!build::separatelyValidatedCode(a.steam)){
     bool protectedCode=false;for(auto c:build::storeCode)if(c.rva==a.store)protectedCode=true;
+    if(!protectedCode)std::cerr << "Missing Store preflight: 0x" << std::hex << a.steam << " -> 0x" << a.store << std::dec << "\n";
     require(protectedCode); // New gameplay/camera hooks must enter the Store preflight.
    }
    require(build::semanticRva(build::rva(a.steam))==a.steam);

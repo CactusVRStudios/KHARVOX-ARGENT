@@ -93,12 +93,12 @@ The PSVR2 bridge is compiled against the official Toolkit CAPI headers through t
 
 ## Experimental native stereo adapter (r136)
 
-The native stereo render implementation derives from the supplied doomvr stereo
-renderer, copyright (c) 2026 dbkni, under the MIT License. Its notice is preserved
+The native stereo renderer attribution is copyright (c) 2026 dbkni,
+under the MIT License. Its notice is preserved
 in `src/native/upstream/LICENSE`. Ordered hook fragments, matrix mathematics,
 resource tracking and diagnostics are retained to preserve their dependencies.
 The KHARVOX adapter replaces presentation/session ownership and the final-pass
-entry assumption; it does not load doomvr.dll or its injector/OpenXR context.
+entry assumption and owns its presentation/session lifecycle.
 The included RenderDoc API header retains its own MIT copyright notice.
 
 MinHook v1.3.4, revision `c3fcafdc10146beb5919319d0683e44e3c30d537`, is statically

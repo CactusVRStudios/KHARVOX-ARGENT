@@ -15,6 +15,7 @@ void updatePose(XrPosef head,bool world,bool recenter,bool positionTracked) noex
 float unitsPerMeter() noexcept;
 void beginRender(uint64_t serial) noexcept;
 void observeRenderedCamera(const void* common,size_t bytes) noexcept;
+bool renderedWorldCamera(uint64_t serial,float* origin,float* axis,float* projection=nullptr) noexcept;
 bool renderedHead(uint64_t serial,XrPosef& pose) noexcept;
 void publishLaser(const float* origin,const float* axis,const char* profile) noexcept;
 bool renderedLaser(uint64_t serial,const char* profile,XrPosef& pose) noexcept;

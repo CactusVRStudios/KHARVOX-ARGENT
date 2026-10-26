@@ -32,13 +32,14 @@ public:
             }
         }).detach();
     }
-    template<class F> auto invoke(F&& fn) {
+    template<class F> auto post(F&& fn) {
         using R=decltype(fn());
         auto task=std::make_shared<std::packaged_task<R()>>(std::forward<F>(fn));
         auto result=task->get_future();
         {std::lock_guard<std::mutex> lock(mutex);tasks.emplace([task]{(*task)();});}
-        wake.notify_one();return result.get();
+        wake.notify_one();return result;
     }
+    template<class F> auto invoke(F&& fn) {return post(std::forward<F>(fn)).get();}
 };
 // Process-lifetime worker: layer is pinned, no join from DLL teardown/loader lock.
 inline XrWorker& xrWorker(){static auto* worker=new XrWorker;return *worker;}

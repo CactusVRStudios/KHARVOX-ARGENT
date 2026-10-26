@@ -37,10 +37,17 @@ XrVector3f currentPosition{},referencePosition{};
 bool translate{},needPositionReference{true};
 bool active{},needReference{true};ULONGLONG updated{};
 RoomscaleFollow follow;BodyYawFollow yawFollow;
+uint64_t turnRenderSerial{};
+double turnClockMs(){
+ static const double ticksPerMs=[] {LARGE_INTEGER f{};QueryPerformanceFrequency(&f);return double(f.QuadPart)/1000.;}();
+ LARGE_INTEGER t{};QueryPerformanceCounter(&t);return double(t.QuadPart)/ticksPerMs;
+}
+
 uint64_t weaponEpoch{1};
 uintptr_t viewActor{};
 uintptr_t physicsOwner{},anchorOwner{};XrVector3f physicsPosition{},anchorOffset{};ULONGLONG physicsTick{};
 Basis bodyBasis{1,0,0,0,1,0,0,0,1};std::array<float,3> bodyOrigin{};bool bodyValid{};
+Basis fgBasis{};std::array<float,3> fgOrigin{};std::array<float,16> fgProjection{};
 bool animationActive{};Basis animationBasis{};XrQuaternionf animationReference{};
 void* animationCamera{};ULONGLONG animationCameraTick{};
 std::atomic<uint64_t> calls{},applied{},rejected{};
@@ -290,6 +297,13 @@ void __fastcall cameraSetter(void* object,const float* position,const float* bas
    Basis input;std::memcpy(input.data(),basis,sizeof(input));
    std::array<float,3> stable{position[0],position[1],position[2]};
    if(validBasis(input)){
+    // One turn publication for the rendered pair, shared by camera, hands and weapons.
+    // Additional camera setters in the same SFS serial never integrate it twice.
+    if(renderSerial&&turnRenderSerial!=renderSerial){
+     if(!sync&&presentation::gameplayInput.load())yawFollow.advanceForRender(turnClockMs());
+     turnRenderSerial=renderSerial;
+    }
+
     if(needReference){reference=yawQuaternion(yawDegrees(current));yawFollow={};needReference=false;historyCursor=0;matchedSerial=0;follow={};anchorOwner=0;}
     const float horizontal=std::hypot(input[0],input[1]);
     if(sync){
@@ -526,7 +540,7 @@ void updatePose(XrPosef head,bool world,bool recenter,bool positionTracked) noex
  else {translate=true;currentPosition=head.position;}
  current=head.orientation;updated=GetTickCount64();active=installed;
  yawFollow.snap(controls.pad.sThumbRX/32767.f,controls.snapDegrees,gameplay&&active&&!needReference&&controls.snapTurn&&input::fresh(controls,GetTickCount64())&&!(controls.pad.wButtons&XINPUT_GAMEPAD_RIGHT_SHOULDER));
- yawFollow.smooth(controls.pad.sThumbRX/32767.f,controls.smoothSpeed,gameplay&&active&&!needReference&&controls.managedTurn&&!controls.snapTurn&&input::fresh(controls,GetTickCount64())&&!(controls.pad.wButtons&XINPUT_GAMEPAD_RIGHT_SHOULDER),GetTickCount64());
+ yawFollow.smooth(controls.pad.sThumbRX/32767.f,controls.smoothSpeed,gameplay&&active&&!needReference&&controls.managedTurn&&!controls.snapTurn&&input::fresh(controls,GetTickCount64())&&!(controls.pad.wButtons&XINPUT_GAMEPAD_RIGHT_SHOULDER),turnClockMs());
  Basis movementBasis{};
  float movementYaw=0;
  if(active&&!needReference&&rotateBasis(Basis{1,0,0,0,1,0,0,0,1},yawFollow.reference(reference),current,movementBasis)&&std::hypot(movementBasis[0],movementBasis[1])>.05f)
@@ -706,7 +720,7 @@ void observeRenderedCamera(const void* common,size_t bytes) noexcept {
    if(positionError<=bestPositionError&&(!match||positionError<bestPositionError)){match=&h;bestPositionError=positionError;}
   }
  }
- if(match){matchedHead=match->head;matchedSerial=renderSerial;matchedCameraId=match->id;matchedHands=match->hands.sample;matchedDepthA=v[2];matchedDepthB=v[3];
+ if(match){fgProjection={};fgProjection[0]=2/nx;fgProjection[5]=-2/ny;fgProjection[10]=v[2];fgProjection[11]=-1;fgProjection[14]=v[3];fgBasis=match->basis;fgOrigin=match->origin;matchedHead=match->head;matchedSerial=renderSerial;matchedCameraId=match->id;matchedHands=match->hands.sample;matchedDepthA=v[2];matchedDepthB=v[3];
   matchedWorldLaser=match->laser;
   // Use the same rendered-camera transform as hands and native geometry.
   // Inverting the placement transform cancels real camera/weapon offsets
@@ -722,6 +736,10 @@ void updateHeadsetFov(const XrPosef& head,const XrView* views,uint32_t count) no
  if(!views||count!=2)return;float x{},y{};
  if(!headsetEnvelope(head,{views[0],views[1]},x,y))return;
  std::lock_guard<std::mutex> lock(fovMutex);requiredFovX=x;requiredFovY=y;
+}
+bool renderedWorldCamera(uint64_t serial,float* origin,float* axis,float* projection) noexcept {
+ std::lock_guard<std::mutex> lock(poseMutex);if(!serial||serial!=matchedSerial||!active||animationActive)return false;
+ std::copy(fgOrigin.begin(),fgOrigin.end(),origin);std::copy(fgBasis.begin(),fgBasis.end(),axis);if(projection)std::copy(fgProjection.begin(),fgProjection.end(),projection);return true;
 }
 bool renderedHead(uint64_t serial,XrPosef& pose) noexcept {std::lock_guard<std::mutex> lock(poseMutex);if(!serial||serial!=matchedSerial||!active)return false;pose=matchedHead;return true;}
 bool renderedHands(uint64_t serial,input::Snapshot& hands,float& depthA,float& depthB) noexcept {

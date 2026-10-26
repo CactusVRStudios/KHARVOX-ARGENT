@@ -3,6 +3,7 @@
 #include <vulkan/vulkan.h>
 #include <cstdint>
 #include <string>
+#include <vector>
 #include "HandSceneTarget.h"
 
 namespace kharvox::hands {
@@ -35,7 +36,10 @@ void handSceneBindPipeline(VkCommandBuffer commandBuffer,
                            VkPipelineBindPoint bindPoint,
                            VkPipeline pipeline);
 void handSceneNextSubpass(VkCommandBuffer commandBuffer);
-void handSceneEndRenderPass(VkCommandBuffer commandBuffer);
+// Optional immutable associations for consumers that follow queue submission
+// order rather than the CPU frame's transient scene-target registry.
+void handSceneEndRenderPass(VkCommandBuffer commandBuffer,
+                            std::vector<HandSceneTarget>* recordedTargets=nullptr);
 
 bool handSceneTargetForColor(VkImage colorImage, VkExtent2D requiredExtent,
                              HandSceneTarget& target);

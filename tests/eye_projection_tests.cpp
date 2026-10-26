@@ -1,5 +1,6 @@
 #include "../src/sfs/EyeProjection.h"
 #include "../src/sfs/EternalProjection.h"
+#include "../src/AnimationFovGuard.h"
 #include <iostream>
 #include <stdexcept>
 using namespace argent::sfs;
@@ -25,6 +26,26 @@ int main(){try{
     check(std::abs(measured[0]+measured[5])<1e-5f,"Portrait camera must use measured square projection");
     portrait[8]=2233;portrait[9]=2405;
     check(eternalProjection(portrait,sizeof(portrait),measured),"Scaled portrait XR camera rejected");
+    // MS Store 1.1p: native animation 58.7155 degrees, protected 112 x 114.
+    // The old independent clamp rejected every projection during the kill.
+    float animation[27]{};animation[2]=-1.000008f;animation[3]=-.06f;animation[8]=2496;animation[9]=2688;
+    auto writeFov=[&](float x,float y){animation[21]=2*std::tan(x*.00872664625997f);animation[26]=-2*std::tan(y*.00872664625997f);animation[5]=-2/animation[26];};
+    writeFov(112,114);check(!eternalProjection(animation,sizeof(animation),measured),"Old asymmetric animation clamp must reproduce stale projection rejection");
+    argent::camera::AnimationFovGuard fovGuard;float animationX=58.715508f,animationY=animationX;
+    check(fovGuard.apply(animationX,animationY,1.482561f,1.539865f),"Animation envelope not applied");
+    check(std::abs(animationX-animationY)<.001f&&animationY>=113.99f,"Animation projection aspect changed or headset clipped");
+    writeFov(animationX,animationY);check(eternalProjection(animation,sizeof(animation),measured),"Protected animation projection must refresh instead of retaining gameplay FOV");
+    // Reprojection must keep a fixed world point at the same visual size as
+    // gameplay when the native camera changes its FOV for an animation.
+    std::array<XrView,2> animationEyes{};for(unsigned i=0;i<2;++i){animationEyes[i].pose={{0,0,0,1},{i?.03149f:-.03149f,0,0}};animationEyes[i].fov={-.8f,.8f,.8f,-.8f};}
+    EyeUniforms animationUniforms;check(parallelEyeProjection(measured,animationEyes,1,animationUniforms),"Animation stereo projection unavailable");
+    const auto nativeClip=point(measured,{.3f,.2f,-2,1});
+    auto projected=point(animationUniforms.clipFromCenter[0],nativeClip);for(unsigned i=0;i<4;++i)projected[i]+=animationUniforms.eyeTranslation[0][i];
+    const auto animationNdc=projected[0]/projected[3];
+    Matrix gameplayProjection=measured;gameplayProjection[0]=.476354f;gameplayProjection[5]=-.476354f;
+    EyeUniforms gameplayUniforms;check(parallelEyeProjection(gameplayProjection,animationEyes,1,gameplayUniforms),"Gameplay projection unavailable");
+    auto gameClip=point(gameplayProjection,{.3f,.2f,-2,1});projected=point(gameplayUniforms.clipFromCenter[0],gameClip);for(unsigned i=0;i<4;++i)projected[i]+=gameplayUniforms.eyeTranslation[0][i];
+    check(std::abs(animationNdc-projected[0]/projected[3])<.00001f,"Animation changed apparent world scale");
     Matrix projection{};projection[0]=1;projection[5]=-1;projection[10]=0;projection[11]=-1;projection[14]=.1f; // infinite reversed-Z
     XrPosef camera{};camera.orientation.w=1;
     std::array<XrView,2> eyes{};for(auto& e:eyes){e.pose=camera;e.fov={-.785398163f,.785398163f,.785398163f,-.785398163f};}

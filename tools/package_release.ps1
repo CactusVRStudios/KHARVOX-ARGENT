@@ -34,8 +34,8 @@ if (!(Select-String -LiteralPath $controls -Pattern '^snap_turn_angle ' -Quiet))
     experimentalStoreImageSize='0x74f1000'
 } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $package 'build-info.json') -Encoding UTF8
 $forbidden = @(Get-ChildItem -LiteralPath $package -Recurse | Where-Object {
-    $_.Name -match '^(docs|licenses|tools|symbols|logs|captures)$|^README|^START[-_ ]HERE' -or
-    (!$_.PSIsContainer -and $_.Extension -in @('.md','.pdb','.py','.ps1','.cmd'))
+    $_.Name -match '^(docs|licenses|tools|symbols|logs|captures)$|^README|^START[-_ ]HERE|^LICENSE|^LICENCE' -or
+    (!$_.PSIsContainer -and $_.Extension -in @('.md','.pdb','.py','.ps1','.cmd','.log','.dmp','.etl','.request'))
 })
 if ($forbidden.Count) { throw ('Non-runtime content in release: ' + ($forbidden.Name -join ', ')) }
 # Keep audit metadata outside the playable package and ZIP.

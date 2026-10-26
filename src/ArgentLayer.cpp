@@ -1,4 +1,7 @@
+#include "sfs/StereoDiagnostic.h"
 #include "QuadRuntime.h"
+#include "framegen/FrameGeneration.h"
+#include "framegen/DeviceFeatures.h"
 #include "StartupCrashTrace.h"
 #include "GpuAddressTrace.h"
 #include "GpuDiagnosticsConfig.h"
@@ -276,7 +279,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice p,const VkDeviceC
         }
         argent::log("GPU_NV_DIAGNOSTICS enabled="+std::to_string(nvDiagnostics)+" flags="+std::to_string(nvDiagnostics?nvConfig.flags:0)+" resourceTracking="+std::to_string(nvDiagnostics&&(nvConfig.flags&VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_RESOURCE_TRACKING_BIT_NV))+" shaderErrors="+std::to_string(nvDiagnostics&&(nvConfig.flags&VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_SHADER_ERROR_REPORTING_BIT_NV)));
     }
-    bool waterRobustness=false,addWaterRobustness=false,addressReport=false,addAddressReport=false;
+    bool waterRobustness=false,addWaterRobustness=false,addressReport=false,addAddressReport=false,fgExternalSemaphore=false;
     VkPhysicalDevicePipelineRobustnessFeaturesEXT waterFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES_EXT};
     VkPhysicalDeviceAddressBindingReportFeaturesEXT addressFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ADDRESS_BINDING_REPORT_FEATURES_EXT};
     if(sfsRequested){
@@ -284,6 +287,10 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice p,const VkDeviceC
         uint32_t count{};std::vector<VkExtensionProperties> available;
         if(enumerate&&enumerate(p,nullptr,&count,nullptr)==VK_SUCCESS){available.resize(count);if(enumerate(p,nullptr,&count,available.data())!=VK_SUCCESS)available.clear();}
         auto has=[&](const char* name){return std::any_of(available.begin(),available.end(),[&](const auto& ext){return !std::strcmp(ext.extensionName,name);});};
+        if(argent::fg::requested()&&has(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME))required.emplace_back(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
+        fgExternalSemaphore=argent::fg::requested()&&has(VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME);
+        if(fgExternalSemaphore)required.emplace_back(VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME);
+
         auto features=reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(i.gipa(i.handle,"vkGetPhysicalDeviceFeatures2"));
         if(features&&has(VK_EXT_PIPELINE_ROBUSTNESS_EXTENSION_NAME)&&has(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME)){
             VkPhysicalDeviceRobustness2FeaturesEXT robustness2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
@@ -316,8 +323,17 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice p,const VkDeviceC
         }
         argent::log("GPU_MATERIAL_FEATURES sampledImageNonUniform="+std::to_string(indexing)+" source="+source);
     }
+    bool fgSupported=false;
+    if(i.game&&argent::fg::requested()){
+        auto query=reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(i.gipa(i.handle,"vkGetPhysicalDeviceFeatures2"));
+        auto enumerate=reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(i.gipa(i.handle,"vkEnumerateDeviceExtensionProperties"));
+        uint32_t count{};bool extension=false;
+        if(enumerate&&enumerate(p,nullptr,&count,nullptr)==VK_SUCCESS){std::vector<VkExtensionProperties> list(count);if(enumerate(p,nullptr,&count,list.data())==VK_SUCCESS)for(const auto& e:list)if(!std::strcmp(e.extensionName,VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME))extension=true;}
+        if(query&&extension){VkPhysicalDeviceDescriptorIndexingFeatures indexing{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES};VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,&indexing};query(p,&features);fgSupported=indexing.descriptorBindingSampledImageUpdateAfterBind!=0;if(fgSupported)required.emplace_back(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);}
+    }
+    argent::fg::DescriptorFeatureRequest fgFeatures(ci->pNext,fgSupported);
     auto enabled=extensions(ci->enabledExtensionCount,ci->ppEnabledExtensionNames,required);
-    auto modified=*ci;modified.enabledExtensionCount=uint32_t(enabled.size());modified.ppEnabledExtensionNames=enabled.data();
+    auto modified=*ci;modified.pNext=fgFeatures.head();modified.enabledExtensionCount=uint32_t(enabled.size());modified.ppEnabledExtensionNames=enabled.data();
     VkPhysicalDeviceMultiviewFeatures mv{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES};
     auto runtimeModified=modified;
     while(runtimeModified.pNext&&static_cast<const VkBaseInStructure*>(runtimeModified.pNext)->sType==VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO)
@@ -347,6 +363,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice p,const VkDeviceC
     if(deferSteamXrDevice||!i.game||!argent::xrCreateGameDevice(get,gdpa,i.handle,p,&runtimeModified,&modified,a,out,r))r=create(p,&modified,a,out);
     if(r==VK_SUCCESS){
         auto s=std::make_shared<State>();s->device=*out;s->physical=p;s->instance=i.handle;s->gipa=i.gipa;s->gdpa=gdpa;s->setLoaderData=setData;s->game=i.game;
+        s->framegenUpdateAfterBind=fgFeatures.enabled();
+        s->framegenExternalSemaphore=fgExternalSemaphore;
+        if(argent::fg::requested())argent::log("FRAMEGEN_DEVICE sampledImageUpdateAfterBind="+std::to_string(s->framegenUpdateAfterBind)+" supported="+std::to_string(fgSupported));
         uint32_t count=0;auto families=reinterpret_cast<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(i.gipa(i.handle,"vkGetPhysicalDeviceQueueFamilyProperties"));
         families(p,&count,nullptr);s->families.resize(count);families(p,&count,s->families.data());
         if(sfsRequested){
@@ -377,8 +396,10 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice p,const VkDeviceC
 }
 VKAPI_ATTR void VKAPI_CALL vkDestroyDevice(VkDevice d,const VkAllocationCallbacks* a){
     auto s=deviceOf(key(d));if(!s)return;
+    if(s->game)argent::waitStereoOutput();
     for(auto& m:s->mirrors)m.second->destroy(*s);s->mirrors.clear();
     if(s->game){argent::camera::stop();argent::shutdownXR(d);}
+    if(s->game){s->proc<PFN_vkDeviceWaitIdle>("vkDeviceWaitIdle")(d);argent::fg::destroyIdle(d);}
     if(s->sfs)argent::sfs::shutdown(d);
     argent::capture::forgetDevice(d);
     {std::lock_guard<std::recursive_mutex> l(stateMutex);devices.erase(key(d));deviceGeneration.fetch_add(1,std::memory_order_release);}
@@ -433,7 +454,9 @@ VkResult prepareStereo(const std::shared_ptr<State>& s,VkSwapchainKHR sc,uint32_
  argent::camera::updatePose(head,!s->menuQuad,recenter,pose.headPositionTracked);
  if(argent::extendedLogging()&&pose.serial%120==0){auto h=argent::camera::stats();argent::log("ETERNAL_HOOK calls="+std::to_string(h.calls)+" applied="+std::to_string(h.applied)+" rejected="+std::to_string(h.rejected));}
   argent::sfs::Matrix projection{};projection[0]=1;projection[5]=-float(source.extent.width)/float(source.extent.height);
-  if(!s->menuQuad&&s->camera.projection(projection)){
+  uint64_t projectionAge=UINT64_MAX;
+  const bool projectionValid=!s->menuQuad&&s->camera.projection(projection,0,&projectionAge);
+  if(projectionValid){
   if(!argent::sfs::parallelEyeProjection(projection,pose.views,argent::camera::unitsPerMeter(),uniforms)){argent::cancelStereoFrame();return VK_SUCCESS;}
   if(argent::extendedLogging()&&(pose.serial==1||pose.serial%120==0))argent::log("ETERNAL_CAMERA_STEREO serial="+std::to_string(pose.serial)+" fx="+std::to_string(projection[0])+" fy="+std::to_string(projection[5])+" unitsPerMeter="+std::to_string(argent::camera::unitsPerMeter())+" positionTracked="+std::to_string(pose.headPositionTracked));
  }
@@ -469,6 +492,25 @@ VkResult prepareStereo(const std::shared_ptr<State>& s,VkSwapchainKHR sc,uint32_
   }
   uniforms.diagnostics[3]=!s->menuQuad?float(screenProbe):0.f;
   if(screenProbe==2)uniforms.diagnostics[0]=0.f;
+  if(argent::extendedLogging()){
+   const bool sync=mode==argent::presentation::Mode::Sync;
+   const bool previousSync=s->framePose.diagnosticSync;
+   pose.diagnosticSync=sync;
+   // Entry/exit plus bounded samples during a sync animation and gameplay baseline.
+   pose.stereoDiagnostic=sync!=previousSync||(sync?pose.serial%12==0:pose.serial%120==0);
+   if(pose.stereoDiagnostic){
+    const auto a=pose.views[0].pose.position,b=pose.views[1].pose.position;
+    const float ipd=std::sqrt((a.x-b.x)*(a.x-b.x)+(a.y-b.y)*(a.y-b.y)+(a.z-b.z)*(a.z-b.z));
+    argent::log("SYNC_STEREO_PREPARE serial="+std::to_string(pose.serial)+" context="+argent::presentation::name(mode)+
+     " sync="+std::to_string(sync)+" syncImmersive="+std::to_string(options.syncImmersive)+" quad="+std::to_string(pose.quadView)+
+     " stereoQuad="+std::to_string(pose.stereoQuad)+" projectionValid="+std::to_string(projectionValid)+
+     " projectionAgeMs="+(projectionAge==UINT64_MAX?std::string("unknown"):std::to_string(projectionAge))+
+     " xrIpdMeters="+std::to_string(ipd)+" fx="+std::to_string(projection[0])+" fy="+std::to_string(projection[5])+
+     argent::sfs::stereoDiagnostic(uniforms));
+   }
+  }
+  pose.framegenEligible=mode==argent::presentation::Mode::Gameplay&&projectionValid&&!pose.quadView;
+  argent::fg::prepare(pose,uniforms,projection);
   s->framePose=pose;argent::sfs::prepare(s->device,pose,uniforms);
  VkResult result;
  {static argent::FrameTiming::Totals t;argent::FrameTiming timing("uniformRetirementAndUpload",t);
@@ -487,18 +529,21 @@ VkResult prepareStereo(const std::shared_ptr<State>& s,VkSwapchainKHR sc,uint32_
 }
 VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(VkDevice d,VkSwapchainKHR sc,uint64_t timeout,VkSemaphore sem,VkFence fence,uint32_t* image){
  auto s=deviceOf(key(d));VkResult r;
+ if(s->game)argent::waitStereoOutput(); // before queue lock or native source reuse
  if(argent::sfs::sourceSwapchain(d,sc)){static argent::FrameTiming::Totals t;argent::FrameTiming timing("sourceAcquire",t);std::lock_guard<std::recursive_mutex> lock(*s->queueMutex);r=argent::sfs::acquireSource(d,sc,timeout,sem,fence,image);}
  else r=s->proc<PFN_vkAcquireNextImageKHR>("vkAcquireNextImageKHR")(d,sc,timeout,sem,fence,image);
  if(r==VK_SUCCESS||r==VK_SUBOPTIMAL_KHR){if(quadSteamPrepareAllowed(s))argent::prepareSteamFrame(*s,sc);const auto prepared=prepareStereo(s,sc,*image);if(prepared!=VK_SUCCESS)return prepared;}return r;
 }
 VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImage2KHR(VkDevice d,const VkAcquireNextImageInfoKHR* info,uint32_t* image){
  auto s=deviceOf(key(d));if(argent::sfs::sourceSwapchain(d,info->swapchain))return info->deviceMask==1?vkAcquireNextImageKHR(d,info->swapchain,info->timeout,info->semaphore,info->fence,image):VK_ERROR_FEATURE_NOT_PRESENT;
+ if(s->game)argent::waitStereoOutput();
  auto r=s->proc<PFN_vkAcquireNextImage2KHR>("vkAcquireNextImage2KHR")(d,info,image);
  if((r==VK_SUCCESS||r==VK_SUBOPTIMAL_KHR)&&image){if(quadSteamPrepareAllowed(s))argent::prepareSteamFrame(*s,info->swapchain);const auto prepared=prepareStereo(s,info->swapchain,*image);if(prepared!=VK_SUCCESS)return prepared;}
  return r;
 }
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice d,const VkSwapchainCreateInfoKHR* ci,const VkAllocationCallbacks* a,VkSwapchainKHR* out){
     auto s=deviceOf(key(d));auto modified=*ci;bool copy=false;
+    if(s->game)argent::waitStereoOutput();
     if(s->sfs&&argent::sfs::sourceRingRequested()){
       if(!s->graphicsQueue)return VK_ERROR_INITIALIZATION_FAILED;
       if(!argent::sfs::sourceRingActive(d)){VkPhysicalDeviceMemoryProperties mem{};
@@ -532,6 +577,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice d,const VkSwapchain
     return r;
 }
 VKAPI_ATTR void VKAPI_CALL vkDestroySwapchainKHR(VkDevice d,VkSwapchainKHR sc,const VkAllocationCallbacks* a){
+    argent::waitStereoOutput();
     auto s=deviceOf(key(d));auto mirror=s->mirrors.find(sc);if(mirror!=s->mirrors.end()){mirror->second->destroy(*s);s->mirrors.erase(mirror);}
     {std::lock_guard<std::recursive_mutex> l(stateMutex);s->sources.erase(sc);}
     if(argent::sfs::sourceSwapchain(d,sc)){argent::cancelStereoFrame();argent::sfs::swapchainDestroyed(d,sc);argent::sfs::destroySourceSwapchain(d,sc);}
@@ -569,7 +615,11 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue q,const VkPresentInfoKH
           if(sourcePresent){
             VkResult r;{static argent::FrameTiming::Totals t;argent::FrameTiming timing("sourceRetire",t);std::lock_guard<std::recursive_mutex> lock(*s->queueMutex);r=argent::sfs::presentSource(s->device,q,*p,consumed);}
             argent::sfs::copyCompleted(s->device);argent::trace::present();auto n=++presents;
-            if(n==1||(argent::extendedLogging()&&n%120==0))argent::log("SFS_GAME_PRESENT count="+std::to_string(n)+" result="+std::to_string(r)+" XRcopied="+std::to_string(consumed));return r;
+            if(n==1||(argent::extendedLogging()&&n%120==0))argent::log("SFS_GAME_PRESENT count="+std::to_string(n)+" result="+std::to_string(r)+" XRcopied="+std::to_string(consumed));
+            // All source retirement, readback and mirror work is complete. The
+            // output task owns only completed XR images, and may now wait for
+            // SteamVR without keeping the native game CPU inside present.
+            argent::dispatchStereoOutput();return r;
           }
           argent::sfs::copyCompleted(s->device);
         }
@@ -582,7 +632,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue q,const VkPresentInfoKH
 }
 VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(VkQueue q,uint32_t n,const VkSubmitInfo* p,VkFence f){
  auto s=deviceOf(key(q));static argent::FrameTiming::Totals total;argent::FrameTiming timing("gameQueueSubmitTotal",total);
- std::lock_guard<std::recursive_mutex> lock(*s->queueMutex);
+ std::unique_lock<std::recursive_mutex> lock(*s->queueMutex);
+ if(s->game&&s->sfs&&argent::fg::requested()){auto pose=argent::sfs::submissionPose(s->device);for(uint32_t i=0;i<n;++i)argent::fg::submitting(q,p[i].commandBufferCount,p[i].pCommandBuffers,&pose);}
  {static argent::FrameTiming::Totals camera;argent::FrameTiming timing("cameraSubmit",camera);observeCamera(s,[&](auto& c){for(uint32_t i=0;i<n;++i)c.submit(q,p[i].commandBufferCount,p[i].pCommandBuffers);});}
  VkResult r;{static argent::FrameTiming::Totals driver;argent::FrameTiming timing("gameQueueSubmitDriver",driver);r=s->proc<PFN_vkQueueSubmit>("vkQueueSubmit")(q,n,p,f);}
  if(r==VK_SUCCESS&&s->sfs)for(uint32_t i=0;i<n;++i)argent::sfs::waterCaptureSubmitted(s->device,q,p[i].commandBufferCount,p[i].pCommandBuffers);
@@ -591,10 +642,10 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(VkQueue q,uint32_t n,const VkSubmit
   uint32_t family=UINT32_MAX;{std::lock_guard<std::recursive_mutex> lock(stateMutex);auto it=s->queues.find(q);if(it!=s->queues.end())family=it->second.family;}
   if(family!=UINT32_MAX)s->camera.readback(*s,q,family,true);
  }
- if(r==VK_SUCCESS&&s->game)for(uint32_t i=0;i<n;++i)argent::trace::submit(q,p[i].commandBufferCount,p[i].pCommandBuffers);return r;
+ if(r==VK_SUCCESS&&s->game)for(uint32_t i=0;i<n;++i)argent::trace::submit(q,p[i].commandBufferCount,p[i].pCommandBuffers);lock.unlock();if(r!=VK_SUCCESS&&s->game)argent::fg::submissionFailed(q);return r;
 }
-VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit2(VkQueue q,uint32_t n,const VkSubmitInfo2* p,VkFence f){auto s=deviceOf(key(q));std::lock_guard<std::recursive_mutex> lock(*s->queueMutex);const auto result=s->proc<PFN_vkQueueSubmit2>("vkQueueSubmit2")(q,n,p,f);if(result==VK_SUCCESS&&s->sfs)for(uint32_t i=0;i<n;++i)for(uint32_t j=0;j<p[i].commandBufferInfoCount;++j){const auto cb=p[i].pCommandBufferInfos[j].commandBuffer;argent::sfs::waterCaptureSubmitted(s->device,q,1,&cb);if(argent::perf::enabled())argent::sfs::performanceSubmitted(s->device,q,1,&cb);}return result;}
-VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit2KHR(VkQueue q,uint32_t n,const VkSubmitInfo2* p,VkFence f){auto s=deviceOf(key(q));std::lock_guard<std::recursive_mutex> lock(*s->queueMutex);const auto result=s->proc<PFN_vkQueueSubmit2KHR>("vkQueueSubmit2KHR")(q,n,p,f);if(result==VK_SUCCESS&&s->sfs)for(uint32_t i=0;i<n;++i)for(uint32_t j=0;j<p[i].commandBufferInfoCount;++j){const auto cb=p[i].pCommandBufferInfos[j].commandBuffer;argent::sfs::waterCaptureSubmitted(s->device,q,1,&cb);if(argent::perf::enabled())argent::sfs::performanceSubmitted(s->device,q,1,&cb);}return result;}
+VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit2(VkQueue q,uint32_t n,const VkSubmitInfo2* p,VkFence f){auto s=deviceOf(key(q));std::unique_lock<std::recursive_mutex> lock(*s->queueMutex);if(s->game&&s->sfs&&argent::fg::requested()){auto pose=argent::sfs::submissionPose(s->device);for(uint32_t i=0;i<n;++i)for(uint32_t j=0;j<p[i].commandBufferInfoCount;++j){auto cb=p[i].pCommandBufferInfos[j].commandBuffer;argent::fg::submitting(q,1,&cb,&pose);}}const auto result=s->proc<PFN_vkQueueSubmit2>("vkQueueSubmit2")(q,n,p,f);if(result==VK_SUCCESS&&s->sfs)for(uint32_t i=0;i<n;++i)for(uint32_t j=0;j<p[i].commandBufferInfoCount;++j){const auto cb=p[i].pCommandBufferInfos[j].commandBuffer;argent::sfs::waterCaptureSubmitted(s->device,q,1,&cb);if(argent::perf::enabled())argent::sfs::performanceSubmitted(s->device,q,1,&cb);}lock.unlock();if(result!=VK_SUCCESS&&s->game)argent::fg::submissionFailed(q);return result;}
+VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit2KHR(VkQueue q,uint32_t n,const VkSubmitInfo2* p,VkFence f){auto s=deviceOf(key(q));std::unique_lock<std::recursive_mutex> lock(*s->queueMutex);if(s->game&&s->sfs&&argent::fg::requested()){auto pose=argent::sfs::submissionPose(s->device);for(uint32_t i=0;i<n;++i)for(uint32_t j=0;j<p[i].commandBufferInfoCount;++j){auto cb=p[i].pCommandBufferInfos[j].commandBuffer;argent::fg::submitting(q,1,&cb,&pose);}}const auto result=s->proc<PFN_vkQueueSubmit2KHR>("vkQueueSubmit2KHR")(q,n,p,f);if(result==VK_SUCCESS&&s->sfs)for(uint32_t i=0;i<n;++i)for(uint32_t j=0;j<p[i].commandBufferInfoCount;++j){const auto cb=p[i].pCommandBufferInfos[j].commandBuffer;argent::sfs::waterCaptureSubmitted(s->device,q,1,&cb);if(argent::perf::enabled())argent::sfs::performanceSubmitted(s->device,q,1,&cb);}lock.unlock();if(result!=VK_SUCCESS&&s->game)argent::fg::submissionFailed(q);return result;}
 VKAPI_ATTR VkResult VKAPI_CALL vkQueueWaitIdle(VkQueue q){auto s=deviceOf(key(q));std::lock_guard<std::recursive_mutex> lock(*s->queueMutex);return s->proc<PFN_vkQueueWaitIdle>("vkQueueWaitIdle")(q);}
 VKAPI_ATTR VkResult VKAPI_CALL vkWaitForFences(VkDevice d,uint32_t n,const VkFence* fences,VkBool32 all,uint64_t timeout){
  auto s=deviceOf(key(d));static argent::FrameTiming::Totals t;argent::FrameTiming timing("gameWaitForFences",t);

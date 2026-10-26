@@ -280,7 +280,7 @@ void handSceneNextSubpass(VkCommandBuffer commandBuffer) {
         ++active->second.subpass;
 }
 
-void handSceneEndRenderPass(VkCommandBuffer commandBuffer) {
+void handSceneEndRenderPass(VkCommandBuffer commandBuffer,std::vector<HandSceneTarget>* recordedTargets) {
     if (!handSceneTrackingEnabled())
         return;
     std::lock_guard<std::mutex> lock(trackerMutex);
@@ -350,6 +350,7 @@ void handSceneEndRenderPass(VkCommandBuffer commandBuffer) {
             target.reverseDepth = convention!=depthConventions.end()?convention->second:active.reverseDepth;
             ++passesWithColorAndDepth;
             targets[handleKey(target.colorImage)] = target;
+            if(recordedTargets)recordedTargets->push_back(target);
             ++publishedTargets;
             break;
         }

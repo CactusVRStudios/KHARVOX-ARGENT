@@ -6,6 +6,7 @@
 #include "sfs/NativeSfs.h"
 #include "QuadRuntime.h"
 #include "BuildFeatures.h"
+#include "framegen/FrameGeneration.h"
 #include <MinHook.h>
 #include <windows.h>
 #include <chrono>
@@ -60,9 +61,12 @@ Result __fastcall evaluate(VkCommandBuffer command,void* handle,void* nativePara
     const auto tick=GetTickCount64();
     const bool reset=!pair.seen||pair.quad!=pose.quadView||pair.stereoQuad!=pose.stereoQuad||pose.recenterRequested||tick-pair.tick>250||pose.serial<pair.serial||pose.serial>pair.serial+1;
     if(reset)for(auto& eye:eyes)eye.params.set<int>(0x38,1);
+    fg::capture(command,eyes,pose);
+    if(fg::requested())sfs::restoreComputeBindings(command);
     const auto left=evaluateOriginal(command,handle,nativeParams,&eyes[0].params);
     const auto right=left==success?evaluateOriginal(command,pair.right,nativeParams,&eyes[1].params):left;
-    if(left!=success||right!=success){fallback("native evaluation failed");return left!=success?left:right;}
+    if(left!=success||right!=success){fg::cancelCapture(pose.serial);fallback("native evaluation failed");return left!=success?left:right;}
+    stereoEvaluated.store(true,std::memory_order_release);
     pair.seen=true;pair.serial=pose.serial;pair.quad=pose.quadView;pair.stereoQuad=pose.stereoQuad;pair.tick=tick;
     if(!timing){if(++pair.samples==1)log("DLSS_STEREO evaluated eyes=2 timing=off");return success;}
     const auto ns=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count());
@@ -70,6 +74,9 @@ Result __fastcall evaluate(VkCommandBuffer command,void* handle,void* nativePara
     if(pair.samples==1||pair.samples%240==0){
         log("DLSS_STEREO evaluated eyes=2 serial="+std::to_string(pose.serial)+" reset="+std::to_string(reset)+
             " input="+std::to_string(input->get<uint32_t>(0x30))+"x"+std::to_string(input->get<uint32_t>(0x34))+
+            " output="+std::to_string(eyes[0].resources[1].width)+"x"+std::to_string(eyes[0].resources[1].height)+
+            " inputPixelPercent="+std::to_string(eyes[0].resources[1].width&&eyes[0].resources[1].height?
+                100.0*input->get<uint32_t>(0x30)*input->get<uint32_t>(0x34)/(double(eyes[0].resources[1].width)*eyes[0].resources[1].height):0.0)+
             " cpuMeanMs="+std::to_string(double(pair.cpuNs)/pair.windowSamples/1e6)+" cpuMaxMs="+std::to_string(double(pair.maxNs)/1e6));
         pair.cpuNs=pair.maxNs=pair.windowSamples=0;
     }

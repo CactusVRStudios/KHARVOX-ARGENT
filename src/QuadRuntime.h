@@ -21,6 +21,8 @@ bool xrCreateGameDevice(PFN_vkGetInstanceProcAddr next,PFN_vkGetDeviceProcAddr g
 void xrBindGameDevice(VkDevice device,PFN_vkGetDeviceProcAddr gdpa);
 std::vector<std::string> xrExtensions(bool device);
 struct Device {
+    bool framegenUpdateAfterBind{};
+    bool framegenExternalSemaphore{};
     std::shared_ptr<std::recursive_mutex> queueMutex=std::make_shared<std::recursive_mutex>();
     VkQueue graphicsQueue{};
     uint32_t graphicsFamily{},graphicsIndex{};
@@ -51,6 +53,10 @@ bool beginStereoFrame(Device& device,const Source& source,sfs::FramePose& pose,X
 using StereoMirror = std::function<void(VkImage,VkExtent2D,VkImageLayout)>;
 bool presentStereoFrame(Device& device,const sfs::StereoFrame& frame,
                         uint32_t waitCount,const VkSemaphore* waits,const StereoMirror& mirror = {});
+// Dispatch only after native source retirement; wait outside all queue/SFS/XR
+// locks before acquiring the next frame or destroying XR resources.
+void dispatchStereoOutput();
+void waitStereoOutput();
 void cancelStereoFrame();
 void shutdownXR(VkDevice device);
 }

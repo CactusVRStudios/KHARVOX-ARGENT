@@ -7,14 +7,16 @@ void check(bool v){if(!v)throw std::runtime_error("headset FOV mismatch");}
 int main(){try{
  argent::camera::AnimationFovGuard guard;
  float ax=60,ay=45;
- check(guard.apply(ax,ay,1.f,1.f)&&std::abs(ax-90)<.001f&&std::abs(ay-90)<.001f);
+ const auto aspect=[](float x,float y){return std::tan(x*.00872664625997f)/std::tan(y*.00872664625997f);};
+ const float nativeAspect=aspect(ax,ay);
+ check(guard.apply(ax,ay,1.f,1.f)&&ax>=90&&std::abs(ay-90)<.001f&&std::abs(aspect(ax,ay)-nativeAspect)<.0001f);
  guard.restore(ax,ay);check(ax==60&&ay==45); // Animation exit / no native rewrite.
  ax=120;ay=100;check(!guard.apply(ax,ay,1,1)&&ax==120&&ay==100);
  ax=60;ay=45;check(guard.apply(ax,ay,1,1));ax=110;
  guard.restore(ax,ay);check(ax==110&&ay==45); // Preserve a newer native write per axis.
  check(!guard.apply(ax,ay,0,1)&&ax==110&&ay==45);
  check(!guard.apply(ax,ay,std::numeric_limits<float>::quiet_NaN(),1));
- ax=60;ay=45;check(guard.apply(ax,ay,2,1)&&ax>120&&std::abs(ay-90)<.001f);
+ ax=60;ay=45;check(guard.apply(ax,ay,2,1)&&ax>120&&ay>=90&&std::abs(aspect(ax,ay)-nativeAspect)<.0001f);
  guard.restore(ax,ay);check(ax==60&&ay==45);
  XrPosef head{{0,0,0,1},{0,0,0}};std::array<XrView,2> eyes{};
  for(auto& e:eyes){e.pose=head;e.fov={-.8f,.8f,.7f,-.7f};}

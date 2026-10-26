@@ -132,12 +132,6 @@ KHARVOX:ARGENT is an independent community project and is not affiliated with, e
 
 All trademarks and product names are property of their respective owners. A legally acquired installation of each supported game is required!
 
-
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/M7G028RQIE)
-
-
-
-
 ## Building from source
 
 This repository contains the ARGENT source code. The instructions below describe the Windows build and its required dependencies.
@@ -147,6 +141,7 @@ This repository contains the ARGENT source code. The instructions below describe
 - Windows x64.
 - Visual Studio with the **Desktop development with C++** workload, MSVC x64 tools, MASM and a Windows SDK. The current release build uses Visual Studio 2026.
 - CMake with support for your installed Visual Studio generator, Git and PowerShell.
+- NVIDIA DLSS SDK 310.9.1 for native DLSS-G (`ARGENT_NGX_SDK`), plus the approved Community DLSS runtime payload used by CIRCLE.
 - The complete project assets and dependencies under `third-party`, including the OpenXR loader, Vulkan headers, MinHook, SPIRV-Cross, cgltf, pocketmod, bHaptics and PSVR2 Toolkit runtime components.
 - An x64 Release installation of glslang and SPIRV-Tools compatible with the MSVC toolchain. Its install directory must contain `include/glslang/Include/glslang_c_interface.h`, `bin/glslang.exe` and these libraries under `lib`: `glslang.lib`, `glslang-default-resource-limits.lib`, `SPIRV-Tools-opt.lib` and `SPIRV-Tools.lib`.
 
@@ -168,7 +163,8 @@ Run the following from the project directory in a Visual Studio Developer PowerS
 cmake -S . -B build-clean -G "Visual Studio 18 2026" -A x64 `
   -DARGENT_CLEAN_RELEASE=ON `
   -DARGENT_BUILD_SFS_TOOLS=ON `
-  -DARGENT_GLSLANG_ROOT="C:/Dependencies/glslang"
+  -DARGENT_GLSLANG_ROOT="C:/Dependencies/glslang" `
+  -DARGENT_NGX_SDK="C:/Dependencies/DLSS"
 
 cmake --build build-clean --config Release --target `
   ArgentLayer ArgentLauncher ArgentRuntimeProbe `

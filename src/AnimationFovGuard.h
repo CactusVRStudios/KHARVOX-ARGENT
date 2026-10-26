@@ -13,8 +13,15 @@ struct AnimationFovGuard {
  bool apply(float& x,float& y,float requiredX,float requiredY){
   auto valid=[](float v){return std::isfinite(v)&&v>0.f;};
   if(!valid(x)||!valid(y)||x>=179.f||y>=179.f||!valid(requiredX)||!valid(requiredY))return false;
-  const float fx=2.f*std::atan(requiredX)*57.2957795131f;
-  const float fy=2.f*std::atan(requiredY)*57.2957795131f;
+  // Widen both axes by the same tangent-space scale. Independent clamps can
+  // change the engine projection aspect (e.g. square -> 112 x 114 degrees),
+  // causing the common-UBO projection validator to retain a stale gameplay FOV.
+  const float tx=std::tan(x*.00872664625997f),ty=std::tan(y*.00872664625997f);
+  if(!valid(tx)||!valid(ty))return false;
+  const float scale=std::max({1.f,requiredX/tx,requiredY/ty});
+  if(scale==1.f)return false;
+  const float fx=2.f*std::atan(tx*scale)*57.2957795131f;
+  const float fy=2.f*std::atan(ty*scale)*57.2957795131f;
   if(fx>=179.f||fy>=179.f)return false;
   nativeX=x;nativeY=y;writtenX=std::max(x,fx);writtenY=std::max(y,fy);
   held=writtenX!=x||writtenY!=y;x=writtenX;y=writtenY;return held;

@@ -1,0 +1,12 @@
+#version 450
+layout(local_size_x=8,local_size_y=8) in;
+layout(set=0,binding=0) uniform sampler2D sourceDepth;
+layout(set=0,binding=1) uniform sampler2D sourceMotion;
+layout(set=0,binding=2,r32f) uniform writeonly image2D outputDepth;
+layout(set=0,binding=3,rgba32f) uniform writeonly image2D outputMotion;
+void main(){
+ ivec2 p=ivec2(gl_GlobalInvocationID.xy);
+ if(any(greaterThanEqual(p,imageSize(outputDepth))))return;
+ imageStore(outputDepth,p,vec4(texelFetch(sourceDepth,p,0).r));
+ imageStore(outputMotion,p,vec4(texelFetch(sourceMotion,p,0).xy,0,0));
+}

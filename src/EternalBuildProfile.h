@@ -8,6 +8,7 @@ namespace argent::build {
 inline bool microsoftStore{};
 struct Address {uintptr_t steam, store;};
 inline constexpr Address addresses[]={
+ {0x66e2c30,0x679a630}, // idRenderSystemLocal; constructor caller LEA 25cf54 / 25d494.
  {0x2d3dba8,0x2ddc328}, // Master Levels screen.
  {0x2d3df10,0x2ddc690}, // Master Levels milestones screen.
  {0x2d3bce8,0x2dda468}, // Difficulty selection screen.
@@ -347,9 +348,11 @@ inline constexpr CodeContract storeCode[]={
  {0x2788c74,{0xe9,0x57,0xf3,0x72,0xff,0xcc,0xcc,0xcc,0x40,0x53,0x48,0x83,0xec,0x20,0x48,0x8d,0x05,0x3f,0xa2,0xd8,0x00,0x48,0x8b,0xd9}},
 };
 // Extent hooks can precede camera installation; the consumer was patched in
-// the reference capture. Each of these has its own exact installer signature.
+// the reference capture. Facing-trigger call sites are checked in
+// EternalMonkeyBar::install before facingEnabled can become true.
+// Each listed address has its own installer signature.
 inline constexpr bool separatelyValidatedCode(uintptr_t steam) noexcept {
- return steam==0x1cbf8c0||steam==0x1cbf8d0||steam==0x1cbfa60||steam==0x17e8740;
+ return steam==0xd9d168||steam==0xd9d185||steam==0x1cbf8c0||steam==0x1cbf8d0||steam==0x1cbfa60||steam==0x17e8740;
 }
 inline constexpr size_t storeCodeCount=sizeof(storeCode)/sizeof(storeCode[0]);
 inline uintptr_t validateStoreCode(const unsigned char* image) noexcept {for(const auto& c:storeCode)if(std::memcmp(image+c.rva,c.bytes,sizeof(c.bytes)))return c.rva;return 0;}

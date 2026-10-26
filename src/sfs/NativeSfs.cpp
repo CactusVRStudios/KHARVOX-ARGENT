@@ -1,3 +1,6 @@
+#include "../framegen/ObservedLayouts.h"
+#include "../framegen/InputLayouts.h"
+#include "StereoDiagnostic.h"
 #include "NativeSfs.h"
 #include "../openxr/GameImageLifetime.h"
 #include "../hands/HandSceneDepthTracker.h"
@@ -89,6 +92,9 @@ struct CommandState {
     PushReplay pushes;
     std::vector<VkImageMemoryBarrier> imageBarriers;
     std::vector<VkImageSubresourceRange> clearRanges;
+    std::vector<VkImageMemoryBarrier> fgPassFinals;
+    std::vector<VkImageMemoryBarrier> fgPassWrites;
+    std::vector<handDepth::HandSceneTarget> fgPassTargets;
 };
 struct State : std::enable_shared_from_this<State> {
     PFN_vkGetDeviceProcAddr resolver{};float timestampPeriod{};std::vector<uint32_t> timestampBits;
@@ -109,6 +115,7 @@ struct State : std::enable_shared_from_this<State> {
     // recorders share resource metadata; only creation/retirement needs exclusivity.
     std::shared_mutex mutex;
     Images images;
+    std::unordered_map<VkImage,VkImageCreateInfo> fgImageInfos;
     std::unique_ptr<WaterGpuCapture> waterCapture;
     argent::DeviceFaultReport deviceFault;
     bool waterRobustness{};
@@ -137,9 +144,13 @@ struct State : std::enable_shared_from_this<State> {
     std::unordered_map<std::string,VkShaderModule> compiled;
     std::unordered_map<uint64_t,uint64_t> uiAliases;
     std::unordered_map<VkRenderPass,VkRenderPass> passes;
+    std::unordered_map<VkRenderPass,std::vector<VkImageLayout>> fgPassLayouts;
+    std::unordered_map<VkRenderPass,std::vector<VkImageLayout>> fgPassWrites;
+    std::unordered_map<VkFramebuffer,std::vector<argent::fg::Layout>> fgFramebufferViews;
     std::unordered_map<VkImageView,uint32_t> viewLayers;
     std::unordered_map<VkImageView,VkImageViewCreateInfo> viewInfos;
     std::unordered_map<VkImageView,std::array<VkImageView,2>> eyeViews;
+    std::unordered_map<VkImageView,std::array<VkImageView,2>> fgSampleViews;
     std::unordered_map<VkFramebuffer,bool> framebufferStereo;
     std::unordered_map<VkPipeline,VkPipeline> stereoPipelines;
     std::unordered_map<VkPipeline,bool> computeStereo;
@@ -311,11 +322,11 @@ VKAPI_ATTR VkResult VKAPI_CALL createImage(VkDevice d,const VkImageCreateInfo* i
     auto info=*i;
     if(s->waterCapture&&(info.usage&(VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))&&!(info.usage&VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT))info.usage|=VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     if(stereoImage(info)&&(info.usage&VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))info.usage|=VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    auto result=s->images.create(d,info,a,out,FN(vkCreateImage));if(result==VK_SUCCESS){handDepth::handSceneImageCreated(*out,info);waterCaptureImage(d,*out,imageInfo(info));if(s->waterCapture)s->waterCapture->image(*out,imageInfo(info));}return result;
+    auto result=s->images.create(d,info,a,out,FN(vkCreateImage));if(result==VK_SUCCESS){auto metadata=imageInfo(info);metadata.pNext=nullptr;metadata.pQueueFamilyIndices=nullptr;s->fgImageInfos[*out]=metadata;handDepth::handSceneImageCreated(*out,info);waterCaptureImage(d,*out,imageInfo(info));if(s->waterCapture)s->waterCapture->image(*out,imageInfo(info));}return result;
 RESULT_END}
 VKAPI_ATTR void VKAPI_CALL destroyImage(VkDevice d,VkImage image,const VkAllocationCallbacks* a){
  kharvox::gameImageLifetime().retire(kharvox::GameImageLifetime::key(image),[&]{
-  auto s=state(d);if(s->waterCapture)s->waterCapture->forgetImage(image);handDepth::handSceneImageDestroyed(image);s->images.destroy(d,image,a,FN(vkDestroyImage));
+  auto s=state(d);{std::unique_lock<std::shared_mutex> lock(s->mutex);s->fgImageInfos.erase(image);}argent::fg::observeImageDestroyed(image);if(s->waterCapture)s->waterCapture->forgetImage(image);handDepth::handSceneImageDestroyed(image);s->images.destroy(d,image,a,FN(vkDestroyImage));
  });
 }
 VKAPI_ATTR VkResult VKAPI_CALL createView(VkDevice d,const VkImageViewCreateInfo* i,const VkAllocationCallbacks* a,VkImageView* out){RESULT_BEGIN
@@ -323,7 +334,7 @@ VKAPI_ATTR VkResult VKAPI_CALL createView(VkDevice d,const VkImageViewCreateInfo
 RESULT_END}
 VKAPI_ATTR void VKAPI_CALL destroyView(VkDevice d,VkImageView view,const VkAllocationCallbacks* a){
  kharvox::gameImageLifetime().retire(kharvox::GameImageLifetime::key(view),[&]{
-  auto s=state(d);std::unique_lock<std::shared_mutex> lock(s->mutex);auto eyes=s->eyeViews.find(view);if(eyes!=s->eyeViews.end()){for(auto eye:eyes->second)if(eye)FN(vkDestroyImageView)(d,eye,nullptr);s->eyeViews.erase(eyes);}handDepth::handSceneImageViewDestroyed(view);if(s->waterCapture)s->waterCapture->forgetView(view);s->viewInfos.erase(view);s->viewLayers.erase(view);FN(vkDestroyImageView)(d,view,a);
+  auto s=state(d);std::unique_lock<std::shared_mutex> lock(s->mutex);for(auto* cache:{&s->eyeViews,&s->fgSampleViews}){auto eyes=cache->find(view);if(eyes!=cache->end()){for(auto eye:eyes->second)if(eye)FN(vkDestroyImageView)(d,eye,nullptr);cache->erase(eyes);}}handDepth::handSceneImageViewDestroyed(view);if(s->waterCapture)s->waterCapture->forgetView(view);s->viewInfos.erase(view);s->viewLayers.erase(view);FN(vkDestroyImageView)(d,view,a);
  });
 }
 VKAPI_ATTR VkResult VKAPI_CALL createPass(VkDevice d,const VkRenderPassCreateInfo* i,const VkAllocationCallbacks* a,VkRenderPass* out){RESULT_BEGIN
@@ -334,9 +345,9 @@ VKAPI_ATTR VkResult VKAPI_CALL createPass(VkDevice d,const VkRenderPassCreateInf
     }input.pAttachments=attachments.data();}
     RenderPassPlan plan(input,true);if(!plan.valid())return VK_ERROR_FEATURE_NOT_PRESENT;
     auto r=FN(vkCreateRenderPass)(d,&input,a,out);if(r!=VK_SUCCESS)return r;VkRenderPass stereo{};r=FN(vkCreateRenderPass)(d,&plan.info(),a,&stereo);
-    if(r!=VK_SUCCESS){FN(vkDestroyRenderPass)(d,*out,a);*out=VK_NULL_HANDLE;return r;}s->passes[*out]=stereo;handDepth::handSceneRenderPassCreated(*out,input);if(s->waterCapture)s->waterCapture->renderPass(*out,input);return VK_SUCCESS;
+    if(r!=VK_SUCCESS){FN(vkDestroyRenderPass)(d,*out,a);*out=VK_NULL_HANDLE;return r;}s->passes[*out]=stereo;s->fgPassLayouts[*out]=argent::fg::finalLayouts(input);s->fgPassWrites[*out]=argent::fg::finalLayouts(input,true);handDepth::handSceneRenderPassCreated(*out,input);if(s->waterCapture)s->waterCapture->renderPass(*out,input);return VK_SUCCESS;
 RESULT_END}
-VKAPI_ATTR void VKAPI_CALL destroyPass(VkDevice d,VkRenderPass pass,const VkAllocationCallbacks* a){auto s=state(d);std::unique_lock<std::shared_mutex> lock(s->mutex);s->passRetirement.fetch_add(1,std::memory_order_release);handDepth::handSceneRenderPassDestroyed(pass);if(s->waterCapture)s->waterCapture->forgetPass(pass);auto it=s->passes.find(pass);if(it!=s->passes.end()){FN(vkDestroyRenderPass)(d,it->second,a);s->passes.erase(it);}FN(vkDestroyRenderPass)(d,pass,a);}
+VKAPI_ATTR void VKAPI_CALL destroyPass(VkDevice d,VkRenderPass pass,const VkAllocationCallbacks* a){auto s=state(d);std::unique_lock<std::shared_mutex> lock(s->mutex);s->passRetirement.fetch_add(1,std::memory_order_release);s->fgPassLayouts.erase(pass);s->fgPassWrites.erase(pass);handDepth::handSceneRenderPassDestroyed(pass);if(s->waterCapture)s->waterCapture->forgetPass(pass);auto it=s->passes.find(pass);if(it!=s->passes.end()){FN(vkDestroyRenderPass)(d,it->second,a);s->passes.erase(it);}FN(vkDestroyRenderPass)(d,pass,a);}
 VKAPI_ATTR VkResult VKAPI_CALL createFramebuffer(VkDevice d,const VkFramebufferCreateInfo* i,const VkAllocationCallbacks* a,VkFramebuffer* out){RESULT_BEGIN
     auto info=*i;bool stereo=i->attachmentCount!=0;
     if(i->flags&VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT)return VK_ERROR_FEATURE_NOT_PRESENT;
@@ -345,6 +356,7 @@ VKAPI_ATTR VkResult VKAPI_CALL createFramebuffer(VkDevice d,const VkFramebufferC
     const bool mixed=stereoAttachments&&stereoAttachments<i->attachmentCount;
     auto pass=s->passes.find(i->renderPass);if(pass==s->passes.end())return VK_ERROR_INITIALIZATION_FAILED;
     if(stereo)info.renderPass=pass->second;auto r=FN(vkCreateFramebuffer)(d,&info,a,out);if(r==VK_SUCCESS){
+        auto& fgViews=s->fgFramebufferViews[*out];fgViews.resize(i->attachmentCount);for(uint32_t j=0;j<i->attachmentCount;++j){auto v=s->viewInfos.find(i->pAttachments[j]);if(v!=s->viewInfos.end())fgViews[j]={v->second.image,v->second.subresourceRange,VK_IMAGE_LAYOUT_UNDEFINED};}
         handDepth::handSceneFramebufferCreated(*out,*i);if(s->waterCapture)s->waterCapture->framebuffer(*out,*i);s->framebufferStereo[*out]=stereo;s->mixedFramebuffers[*out]=mixed;
         if(mixed&&s->mixedDiagnostics++<24){
             note("[SFS-MIXED] framebuffer="+std::to_string(reinterpret_cast<uintptr_t>(*out))+" size="+std::to_string(i->width)+"x"+std::to_string(i->height)+" stereoAttachments="+std::to_string(stereoAttachments)+" total="+std::to_string(i->attachmentCount)+" mode=mono");
@@ -352,7 +364,7 @@ VKAPI_ATTR VkResult VKAPI_CALL createFramebuffer(VkDevice d,const VkFramebufferC
         }
     }return r;
 RESULT_END}
-VKAPI_ATTR void VKAPI_CALL destroyFramebuffer(VkDevice d,VkFramebuffer fb,const VkAllocationCallbacks* a){auto s=state(d);std::unique_lock<std::shared_mutex> lock(s->mutex);s->framebufferRetirement.fetch_add(1,std::memory_order_release);handDepth::handSceneFramebufferDestroyed(fb);if(s->waterCapture)s->waterCapture->forgetFramebuffer(fb);s->framebufferStereo.erase(fb);s->mixedFramebuffers.erase(fb);FN(vkDestroyFramebuffer)(d,fb,a);}
+VKAPI_ATTR void VKAPI_CALL destroyFramebuffer(VkDevice d,VkFramebuffer fb,const VkAllocationCallbacks* a){auto s=state(d);std::unique_lock<std::shared_mutex> lock(s->mutex);s->framebufferRetirement.fetch_add(1,std::memory_order_release);handDepth::handSceneFramebufferDestroyed(fb);if(s->waterCapture)s->waterCapture->forgetFramebuffer(fb);s->fgFramebufferViews.erase(fb);s->framebufferStereo.erase(fb);s->mixedFramebuffers.erase(fb);FN(vkDestroyFramebuffer)(d,fb,a);}
 VKAPI_ATTR VkResult VKAPI_CALL createLayout(VkDevice d,const VkDescriptorSetLayoutCreateInfo* i,const VkAllocationCallbacks* a,VkDescriptorSetLayout* out){RESULT_BEGIN
     std::vector<VkDescriptorSetLayoutBinding> bindings;if(i->bindingCount)bindings.assign(i->pBindings,i->pBindings+i->bindingCount);uint32_t dynamic=0;
     for(const auto& b:bindings){if(b.descriptorType==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC||b.descriptorType==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)dynamic+=b.descriptorCount;}
@@ -496,7 +508,7 @@ VKAPI_ATTR VkResult VKAPI_CALL compute(VkDevice d,VkPipelineCache cache,uint32_t
     }return VK_SUCCESS;
 RESULT_END}
 VKAPI_ATTR void VKAPI_CALL destroyPipeline(VkDevice d,VkPipeline pipeline,const VkAllocationCallbacks* a){auto s=state(d);std::unique_lock<std::shared_mutex> lock(s->mutex);if(s->waterCapture)s->waterCapture->forgetPipeline(pipeline);handDepth::handScenePipelineDestroyed(pipeline);s->pipelineRetirement.fetch_add(1,std::memory_order_release);auto it=s->stereoPipelines.find(pipeline);if(it!=s->stereoPipelines.end()){FN(vkDestroyPipeline)(d,it->second,a);s->stereoPipelines.erase(it);}auto indirect=s->indirectPipelines.find(pipeline);if(indirect!=s->indirectPipelines.end()){for(auto eye:indirect->second)FN(vkDestroyPipeline)(d,eye,a);s->indirectPipelines.erase(indirect);}s->computeStereo.erase(pipeline);FN(vkDestroyPipeline)(d,pipeline,a);}
-VKAPI_ATTR VkResult VKAPI_CALL beginCommand(VkCommandBuffer cb,const VkCommandBufferBeginInfo* i){try{auto s=state(cb);std::shared_lock<std::shared_mutex> lock(s->mutex);if(i->pInheritanceInfo&&i->pInheritanceInfo->renderPass)return VK_ERROR_FEATURE_NOT_PRESENT;auto& command=commandUnderLock(s,cb);command.stereo=false;command.compute=VK_NULL_HANDLE;command.graphics=VK_NULL_HANDLE;command.graphicsInfo={};command.computeInfo={};for(auto& descriptor:command.descriptors)descriptor.set=VK_NULL_HANDLE;for(auto& descriptor:command.computeDescriptors)descriptor.set=VK_NULL_HANDLE;command.queryCopies=0;command.bindings.clear();command.pushes.clear();
+VKAPI_ATTR VkResult VKAPI_CALL beginCommand(VkCommandBuffer cb,const VkCommandBufferBeginInfo* i){try{auto s=state(cb);std::shared_lock<std::shared_mutex> lock(s->mutex);if(i->pInheritanceInfo&&i->pInheritanceInfo->renderPass)return VK_ERROR_FEATURE_NOT_PRESENT;auto& command=commandUnderLock(s,cb);argent::fg::observeBegin(cb,command.primary&&!(i->flags&VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT)?command.family:UINT32_MAX);command.fgPassFinals.clear();command.fgPassWrites.clear();command.stereo=false;command.compute=VK_NULL_HANDLE;command.graphics=VK_NULL_HANDLE;command.graphicsInfo={};command.computeInfo={};for(auto& descriptor:command.descriptors)descriptor.set=VK_NULL_HANDLE;for(auto& descriptor:command.computeDescriptors)descriptor.set=VK_NULL_HANDLE;command.queryCopies=0;command.bindings.clear();command.pushes.clear();
     // We already resolved the command under the lock. Prime the recording
     // thread's cache here instead of reacquiring it at the first pipeline bind.
     if(s->waterCapture)s->waterCapture->reset(cb);
@@ -669,12 +681,13 @@ VKAPI_ATTR void VKAPI_CALL beginPass(VkCommandBuffer cb,const VkRenderPassBeginI
         if(s->profileTiming)s->passCacheMisses.fetch_add(1,std::memory_order_relaxed);
         std::shared_lock<std::shared_mutex> lock(s->mutex);return s->passes.at(i->renderPass);
     });
+    local.fgPassFinals.clear();local.fgPassWrites.clear();if(argent::fg::onBarriers.load()){std::shared_lock<std::shared_mutex> lock(s->mutex);auto pass=s->fgPassLayouts.find(i->renderPass);auto fb=s->fgFramebufferViews.find(i->framebuffer);if(pass!=s->fgPassLayouts.end()&&fb!=s->fgFramebufferViews.end()){local.fgPassFinals=argent::fg::finalTransitions(pass->second,fb->second,framebuffer.stereo);local.fgPassWrites=argent::fg::finalTransitions(s->fgPassWrites.at(i->renderPass),fb->second,framebuffer.stereo);}}
     handDepth::handSceneBeginRenderPass(cb,i);handDepth::handSceneBindPipeline(cb,VK_PIPELINE_BIND_POINT_GRAPHICS,local.graphics);
     local.stereo=framebuffer.stereo;if(!argent::cleanRelease&&framebuffer.mixed)s->mixedPasses.fetch_add(1,std::memory_order_relaxed);
     if(s->waterCapture){auto shot=s->waterCapture->graphicsBegin(cb,*i,local.waterEligible&&local.captureGraphicsQueue,local.stereo);if(shot){std::shared_lock<std::shared_mutex> guard(s->mutex);const auto* bytes=reinterpret_cast<const unsigned char*>(&s->renderUniforms);shot->projection.assign(bytes,bytes+sizeof(s->renderUniforms));shot->frameSerial=s->renderPose.serial;}}
     FN(vkCmdBeginRenderPass)(cb,&info,contents);replayBindings(s,cb,local);
 COMMAND_END}
-VKAPI_ATTR void VKAPI_CALL endPass(VkCommandBuffer cb){LOCAL_COMMAND_BEGIN const auto& vp=local.bindings.viewports;if(!vp.empty()&&vp[0].valid)handDepth::handSceneViewport(cb,vp[0].value);handDepth::handSceneEndRenderPass(cb);FN(vkCmdEndRenderPass)(cb);if(s->waterCapture)s->waterCapture->graphicsEnd(cb);local.stereo=false;if(!argent::cleanRelease&&local.gpuActivePass>=0){auto& p=local.gpuPasses[size_t(local.gpuActivePass)];p.end=local.gpuPoints++;local.gpu.point(cb,p.end);local.gpuActivePass=-1;}if(!argent::cleanRelease&&local.census)local.census->pass(0,0,0);COMMAND_END}
+VKAPI_ATTR void VKAPI_CALL endPass(VkCommandBuffer cb){LOCAL_COMMAND_BEGIN const auto& vp=local.bindings.viewports;if(!vp.empty()&&vp[0].valid)handDepth::handSceneViewport(cb,vp[0].value);local.fgPassTargets.clear();handDepth::handSceneEndRenderPass(cb,argent::fg::onTargets.load()?&local.fgPassTargets:nullptr);FN(vkCmdEndRenderPass)(cb);if(!local.fgPassTargets.empty())argent::fg::observeTargets(cb,uint32_t(local.fgPassTargets.size()),local.fgPassTargets.data());if(!local.fgPassWrites.empty()){argent::fg::observeWrites(cb,uint32_t(local.fgPassWrites.size()),local.fgPassWrites.data());local.fgPassWrites.clear();}if(!local.fgPassFinals.empty()){argent::fg::observeBarriers(cb,uint32_t(local.fgPassFinals.size()),local.fgPassFinals.data());local.fgPassFinals.clear();}if(s->waterCapture)s->waterCapture->graphicsEnd(cb);local.stereo=false;if(!argent::cleanRelease&&local.gpuActivePass>=0){auto& p=local.gpuPasses[size_t(local.gpuActivePass)];p.end=local.gpuPoints++;local.gpu.point(cb,p.end);local.gpuActivePass=-1;}if(!argent::cleanRelease&&local.census)local.census->pass(0,0,0);COMMAND_END}
 VKAPI_ATTR void VKAPI_CALL nextPass(VkCommandBuffer cb,VkSubpassContents contents){LOCAL_COMMAND_BEGIN if(!argent::cleanRelease&&local.census)++local.census->graphics.subpass;handDepth::handSceneNextSubpass(cb);FN(vkCmdNextSubpass)(cb,contents);if(s->waterCapture)s->waterCapture->graphicsNext(cb);replayBindings(s,cb,local);COMMAND_END}
 VKAPI_ATTR void VKAPI_CALL lineWidth(VkCommandBuffer cb,float width){LOCAL_COMMAND_BEGIN
     local.bindings.line=width;FN(vkCmdSetLineWidth)(cb,width);
@@ -746,7 +759,7 @@ VKAPI_ATTR void VKAPI_CALL barriers(VkCommandBuffer cb,VkPipelineStageFlags src,
             if(image.oldLayout==VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)image.oldLayout=VK_IMAGE_LAYOUT_GENERAL;
             if(image.newLayout==VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)image.newLayout=VK_IMAGE_LAYOUT_GENERAL;
         }
-    }handDepth::handSceneImageBarriers(ni,images.data());FN(vkCmdPipelineBarrier)(cb,src,dst,deps,nm,m,nb,b,ni,images.data());
+    }argent::fg::observeBarriers(cb,ni,images.data());handDepth::handSceneImageBarriers(ni,images.data());FN(vkCmdPipelineBarrier)(cb,src,dst,deps,nm,m,nb,b,ni,images.data());
 COMMAND_END}
 VKAPI_ATTR void VKAPI_CALL clearColor(VkCommandBuffer cb,VkImage image,VkImageLayout layout,const VkClearColorValue* value,uint32_t count,const VkImageSubresourceRange* ranges){COMMAND_BEGIN
     auto& copies=commandUnderLock(s,cb).clearRanges;copies.clear();if(count)copies.assign(ranges,ranges+count);for(auto& r:copies)r=range(s,image,r);FN(vkCmdClearColorImage)(cb,image,layout,value,count,copies.data());
@@ -782,8 +795,9 @@ bool initialize(VkDevice d,VkPhysicalDevice physical,PFN_vkGetDeviceProcAddr gdp
         {std::lock_guard<std::mutex> lock(devicesMutex);devices[dispatchKey(d)]=s;deviceGeneration.fetch_add(1,std::memory_order_release);}note(vrEnabled()?"native SFS experimental OpenXR producer initialized":"native multiview probe initialized; fixed identity projection; NOT VR");return true;
     }catch(const std::exception& e){note(e.what());if(s->params)FN(vkDestroyBuffer)(d,s->params,nullptr);if(s->paramsMemory)FN(vkFreeMemory)(d,s->paramsMemory,nullptr);return false;}
 }
-void shutdown(VkDevice d){if(!nativeProbeEnabled())return;std::shared_ptr<State> s;try{s=state(d)->shared_from_this();}catch(const std::exception&){return;}std::unique_lock<std::shared_mutex> lock(s->mutex);if(FN(vkDeviceWaitIdle)(d)!=VK_SUCCESS)commandFailure("SFS shutdown retirement failed");if(s->waterCapture){s->waterCapture->poll(false);s->waterCapture->shutdown();}for(auto& c:s->commands)c.second.gpu.shutdownAfterCompletion();handDepth::handSceneDeviceDestroyed();s->commandRetirement.fetch_add(1,std::memory_order_release);s->commands.clear();s->queryResolver.reset();if(s->sources)s->sources->clearAfterDeviceIdle();for(auto& entry:s->eyeViews)for(auto eye:entry.second)if(eye)FN(vkDestroyImageView)(d,eye,nullptr);s->eyeViews.clear();for(auto& module:s->compiled)FN(vkDestroyShaderModule)(d,module.second,nullptr);FN(vkDestroyBuffer)(d,s->params,nullptr);FN(vkFreeMemory)(d,s->paramsMemory,nullptr);std::lock_guard<std::mutex> devicesLock(devicesMutex);for(auto it=devices.begin();it!=devices.end();)if(it->second==s)it=devices.erase(it);else ++it;deviceGeneration.fetch_add(1,std::memory_order_release);}
+void shutdown(VkDevice d){if(!nativeProbeEnabled())return;std::shared_ptr<State> s;try{s=state(d)->shared_from_this();}catch(const std::exception&){return;}std::unique_lock<std::shared_mutex> lock(s->mutex);if(FN(vkDeviceWaitIdle)(d)!=VK_SUCCESS)commandFailure("SFS shutdown retirement failed");if(s->waterCapture){s->waterCapture->poll(false);s->waterCapture->shutdown();}for(auto& c:s->commands)c.second.gpu.shutdownAfterCompletion();handDepth::handSceneDeviceDestroyed();s->commandRetirement.fetch_add(1,std::memory_order_release);s->commands.clear();s->queryResolver.reset();if(s->sources)s->sources->clearAfterDeviceIdle();for(auto& entry:s->eyeViews)for(auto eye:entry.second)if(eye)FN(vkDestroyImageView)(d,eye,nullptr);s->eyeViews.clear();for(auto& entry:s->fgSampleViews)for(auto eye:entry.second)if(eye)FN(vkDestroyImageView)(d,eye,nullptr);s->fgSampleViews.clear();for(auto& module:s->compiled)FN(vkDestroyShaderModule)(d,module.second,nullptr);FN(vkDestroyBuffer)(d,s->params,nullptr);FN(vkFreeMemory)(d,s->paramsMemory,nullptr);std::lock_guard<std::mutex> devicesLock(devicesMutex);for(auto it=devices.begin();it!=devices.end();)if(it->second==s)it=devices.erase(it);else ++it;deviceGeneration.fetch_add(1,std::memory_order_release);}
 bool vrEnabled(){static const bool enabled=[] {char value[8]{};return GetEnvironmentVariableA("ARGENT_SFS_NATIVE_VR",value,8)==1&&value[0]=='1';}();return nativeProbeEnabled()&&enabled;}
+FramePose submissionPose(VkDevice d){auto s=state(d);std::shared_lock<std::shared_mutex> lock(s->mutex);return s->frameValid?s->renderPose:FramePose{};}
 bool dlssEyeResources(VkCommandBuffer command,const std::array<const dlss::Resource*,30>& input,std::array<dlss::EyeParameters,2>& output,FramePose& pose){
     auto s=state(command);std::unique_lock<std::shared_mutex> lock(s->mutex);
     pose=s->renderPose;
@@ -821,6 +835,23 @@ bool eyeAttachmentView(VkDevice d,VkImageView original,uint32_t eye,VkImageView&
     if(!cached){info.viewType=VK_IMAGE_VIEW_TYPE_2D;info.subresourceRange.baseArrayLayer+=eye;info.subresourceRange.layerCount=1;
         if(FN(vkCreateImageView)(d,&info,nullptr,&cached)!=VK_SUCCESS)return false;}
     result=cached;return true;
+}
+bool framegenEyeInputs(VkDevice d,const std::array<dlss::Resource,2>& input,std::array<dlss::EyeParameters,2>& out){
+ auto s=state(d);std::unique_lock<std::shared_mutex> lock(s->mutex);
+ for(unsigned j=0;j<2;++j){
+  const auto& r=input[j];auto it=s->viewInfos.find(r.view);if(it==s->viewInfos.end())return false;
+  const auto& info=it->second;auto image=s->fgImageInfos.find(r.image);
+  if(image==s->fgImageInfos.end()||!(image->second.usage&VK_IMAGE_USAGE_SAMPLED_BIT)||image->second.samples!=VK_SAMPLE_COUNT_1_BIT||image->second.extent.width!=r.width||image->second.extent.height!=r.height)return false;
+  if(info.image!=r.image||info.format!=r.format||info.viewType!=VK_IMAGE_VIEW_TYPE_2D_ARRAY||
+     info.subresourceRange.layerCount!=2||info.subresourceRange.levelCount!=1||
+     !argent::fg::covers(info.subresourceRange,r.range)||s->images.layers(r.image)!=2)return false;
+  auto& cached=s->fgSampleViews[r.view];
+  for(unsigned e=0;e<2;++e){auto vi=info;vi.viewType=VK_IMAGE_VIEW_TYPE_2D;vi.subresourceRange=r.range;vi.subresourceRange.baseArrayLayer+=e;vi.subresourceRange.layerCount=1;
+   if(!cached[e]&&FN(vkCreateImageView)(d,&vi,nullptr,&cached[e])!=VK_SUCCESS)return false;
+   auto& target=out[e].resources[j+2];target=r;target.view=cached[e];target.range=vi.subresourceRange;
+  }
+ }
+ return true;
 }
 void prepare(VkDevice d,const FramePose& pose,const EyeUniforms& uniforms){
     if(!vrEnabled())return;auto s=state(d);std::unique_lock<std::shared_mutex> lock(s->mutex);
@@ -895,6 +926,7 @@ VkResult beginFrame(VkDevice d,VkSwapchainKHR chain,uint32_t imageIndex){
     }
     handDepth::handSceneBeginFrame();s->renderPose=s->pendingPose;s->frameValid=true;s->pending=false;s->completed=false;
     s->renderUniforms=s->pendingUniforms;
+    if(s->renderPose.stereoDiagnostic&&argent::extendedLogging())note("SYNC_STEREO_UPLOAD serial="+std::to_string(s->renderPose.serial)+" sync="+std::to_string(s->renderPose.diagnosticSync)+stereoDiagnostic(s->renderUniforms));
     }
     // An acquired image uses the uniforms actually installed above, not the
     // newest pending XR prediction. Other swapchain images retain their pose.
@@ -969,6 +1001,14 @@ void reportGpuCheckpoints(VkDevice d,VkQueue queue) noexcept {
   for(uint32_t i=0;i<count;++i){const auto& row=data[i];const auto id=reinterpret_cast<uintptr_t>(row.pCheckpointMarker);const auto label=s->markerLabels.find(id);
    note("GPU_CHECKPOINT queue="+std::to_string(reinterpret_cast<uintptr_t>(queue))+" stage="+std::to_string(row.stage)+" marker="+std::to_string(id)+" "+(label==s->markerLabels.end()?"unknown":label->second));}
  }catch(const std::exception& error){note(std::string("GPU_CHECKPOINT_FAILED ")+error.what());}
+}
+void restoreComputeBindings(VkCommandBuffer cb){
+ auto s=state(cb);auto& command=localCommand(s,cb);
+ if(command.compute)FN(vkCmdBindPipeline)(cb,VK_PIPELINE_BIND_POINT_COMPUTE,command.compute);
+ // Replay in original binding order, including pipeline-layout compatibility.
+ std::vector<uint32_t> order;for(uint32_t i=0;i<command.computeDescriptors.size();++i)if(command.computeDescriptors[i].set)order.push_back(i);
+ std::sort(order.begin(),order.end(),[&](uint32_t a,uint32_t b){return command.computeDescriptors[a].order<command.computeDescriptors[b].order;});
+ for(auto index:order){const auto& b=command.computeDescriptors[index];FN(vkCmdBindDescriptorSets)(cb,VK_PIPELINE_BIND_POINT_COMPUTE,b.layout,index,1,&b.set,uint32_t(b.dynamic.size()),b.dynamic.data());}
 }
 bool sourceRingRequested(){static const bool enabled=[] {char value[8]{};return GetEnvironmentVariableA("ARGENT_SFS_SOURCE_RING",value,8)==1&&value[0]=='1';}();return vrEnabled()&&enabled;}
 bool configureSourceRing(VkDevice d,PFN_vkGetDeviceProcAddr resolver,const VkPhysicalDeviceMemoryProperties& memory,VkQueue queue,void(*lock)(),void(*unlock)()){

@@ -3,7 +3,6 @@
 #include <chrono>
 #include <windows.h>
 #include <winternl.h>
-#include <d3dkmthk.h>
 #include <commctrl.h>
 #include <commdlg.h>
 #include <objidl.h>
@@ -23,48 +22,25 @@
 #include "hands/HandWeaponProfile.h"
 #include "hands/CalibrationDraft.h"
 #include <vector>
+#include <dxgi1_4.h>
+#include <wrl/client.h>
+#include "framegen/AdapterPolicy.h"
 int runArgentVrIntro(const wchar_t* loaderPath);
 
 namespace {
 using argent::cleanRelease;
 
+bool framegenAdapterAvailable(){
+    Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+    if(FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))return false;
+    for(UINT i=0;;++i){Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;if(factory->EnumAdapters1(i,&adapter)!=S_OK)break;DXGI_ADAPTER_DESC1 desc{};
+        if(SUCCEEDED(adapter->GetDesc1(&desc))&&argent::fg::supportedAdapter(desc.VendorId,desc.Description,(desc.Flags&DXGI_ADAPTER_FLAG_SOFTWARE)!=0))return true;
+    }return false;
+}
 bool runningUnderWine() {
     // Proton and other Wine-based compatibility layers expose this ntdll export.
     const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     return ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr;
-}
-
-// Query the active driver state, not the registry preference pending a reboot.
-// Missing APIs or unsupported queries are unknown, never evidence of enabled HAGS.
-bool hardwareGpuSchedulingEnabled() {
-    const HMODULE gdi = LoadLibraryExW(L"gdi32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (!gdi) return false;
-    const auto enumerate = reinterpret_cast<PFND3DKMT_ENUMADAPTERS2>(GetProcAddress(gdi, "D3DKMTEnumAdapters2"));
-    const auto query = reinterpret_cast<PFND3DKMT_QUERYADAPTERINFO>(GetProcAddress(gdi, "D3DKMTQueryAdapterInfo"));
-    const auto close = reinterpret_cast<PFND3DKMT_CLOSEADAPTER>(GetProcAddress(gdi, "D3DKMTCloseAdapter"));
-    bool enabled = false;
-    if (enumerate && query && close) {
-        D3DKMT_ADAPTERINFO adapters[64]{};
-        D3DKMT_ENUMADAPTERS2 enumeration{};
-        enumeration.NumAdapters = 64;
-        enumeration.pAdapters = adapters;
-        if (enumerate(&enumeration) >= 0) {
-            for (ULONG i = 0; i < std::min(enumeration.NumAdapters, ULONG(64)); ++i) {
-                D3DKMT_WDDM_2_7_CAPS caps{};
-                D3DKMT_QUERYADAPTERINFO info{};
-                info.hAdapter = adapters[i].hAdapter;
-                info.Type = KMTQAITYPE_WDDM_2_7_CAPS;
-                info.pPrivateDriverData = &caps;
-                info.PrivateDriverDataSize = sizeof(caps);
-                if (query(&info) >= 0 && caps.HwSchEnabled) enabled = true;
-                D3DKMT_CLOSEADAPTER closing{};
-                closing.hAdapter = adapters[i].hAdapter;
-                close(&closing);
-            }
-        }
-    }
-    FreeLibrary(gdi);
-    return enabled;
 }
 
 void configureStereoDlss(std::map<std::wstring,std::wstring>& env,int mode){
@@ -102,7 +78,7 @@ enum : int {
     IdFsr, IdSmoothSpeed, IdPhysicalKill, IdKillSpeed, IdKillHands, IdAutomatic, IdSync, IdTraversal, IdShoulder,
     IdHandSmoothing, IdHandsJump, IdVirtualGunstock, IdBhaptics, IdPsvr2Triggers,
     IdExtendedLogging, IdShowHands, IdCalibrationMode, IdCalibrationProfile, IdApplyCalibration, IdCalibrationFiles, IdPivotForward, IdPivotLeft, IdPivotUp,
-    IdCinematics3d, IdGpuDiagnostics, IdDisableVrIntro, IdRenderingLogging, IdCredit, IdDesktopMirror, IdMirrorResolution, IdTabBase = 200
+    IdFramegen, IdCinematics3d, IdGpuDiagnostics, IdDisableVrIntro, IdRenderingLogging, IdCredit, IdDesktopMirror, IdMirrorResolution, IdTabBase = 200
 };
 
 HWND tabButtons[7]{}, gameEdit{}, statusText{}, launchButton{};
@@ -113,6 +89,7 @@ HWND automatic{},syncImmersive{},traversal{},shoulder{};
 HWND extendedLogging{},showHands{},handsJump{},handSmoothing{},calibrationMode{},calibrationProfile{},weaponPivot[3]{};
 argent::calibration::ApplyCommand calibrationApplyCommand;bool calibrationApplyWaiting{};
 HWND cinematics3d{},gpuDiagnostics{};
+HWND framegen2x{};bool framegenAvailable{};
 HWND disableVrIntro{}, renderingLogging{}, desktopMirror{}, mirrorResolution{};
 bool advancedTabs{};
 bool vrIntroStarted{},launchInProgress{},introCancelled{};
@@ -123,6 +100,8 @@ HANDLE worker{};
 HFONT uiFont{}, titleFont{};
 HBRUSH backgroundBrush{}, panelBrush{}, fieldBrush{};
 Gdiplus::Image* logo{};
+Gdiplus::Image* kofiImage{};
+constexpr int IdKofi=190;
 ULONG_PTR gdiplusToken{};
 std::filesystem::path root;
 int activeTab{};
@@ -416,7 +395,7 @@ bool usesSteamVrRuntime() {
 }
 void updateRenderingAvailability(bool steamVr) {
     EnableWindow(renderScale,!steamVr);
-    EnableWindow(fsr,!steamVr);
+    EnableWindow(fsr,!steamVr&&!isChecked(framegen2x));
     SetWindowTextW(fsrStatus,steamVr
         ? L"SteamVR detected , adjust render scale within SteamVR."
         : L"FSR is disabled at 100% res or higher. Turn off for DLSS usage.");
@@ -518,7 +497,7 @@ HWND addCombo(HWND parent, int x, int y, int w, int h, int id,
     return c;
 }
 
-bool extraCheck(HWND h){return h==handSmoothing||h==handsJump||h==dominantHand||h==desktopMirror||h==renderingLogging||h==disableVrIntro||h==cinematics3d||h==fsr||h==physicalKill||h==virtualGunstock||h==bhaptics||h==psvr2Triggers||h==extendedLogging||h==gpuDiagnostics||h==showHands;}
+bool extraCheck(HWND h){return h==framegen2x||h==handSmoothing||h==handsJump||h==dominantHand||h==desktopMirror||h==renderingLogging||h==disableVrIntro||h==cinematics3d||h==fsr||h==physicalKill||h==virtualGunstock||h==bhaptics||h==psvr2Triggers||h==extendedLogging||h==gpuDiagnostics||h==showHands;}
 void configureGpuDiagnostics(std::map<std::wstring,std::wstring>& env,bool enabled){env[L"ARGENT_GPU_DIAGNOSTICS"]=enabled?L"1":L"0";}
 std::wstring loggingArgument(){return isChecked(extendedLogging)?L" -ExtendedLogging":L"";}
 std::map<std::string,std::string> controlsSettings() {
@@ -559,8 +538,8 @@ std::map<std::string,std::string> controlsSettings() {
     return values;
 }
 std::map<std::wstring,HWND> launcherChecks(){
-    if constexpr(cleanRelease)return {{L"desktopMirror",desktopMirror},{L"fsr",fsr},{L"extendedLoggingOptIn",extendedLogging},{L"captureShaders",captureShaders},{L"gpuCrashDiagnosticsOptIn",gpuDiagnostics}};
-    return {{L"desktopMirror",desktopMirror},{L"fsr",fsr},{L"extendedLogging",extendedLogging},{L"disableAa",disableAa},
+    if constexpr(cleanRelease)return {{L"framegen2x",framegen2x},{L"desktopMirror",desktopMirror},{L"fsr",fsr},{L"extendedLoggingOptIn",extendedLogging},{L"captureShaders",captureShaders},{L"gpuCrashDiagnosticsOptIn",gpuDiagnostics}};
+    return {{L"framegen2x",framegen2x},{L"desktopMirror",desktopMirror},{L"fsr",fsr},{L"extendedLogging",extendedLogging},{L"disableAa",disableAa},
         {L"captureShaders",captureShaders},{L"simulator",simulator},{L"gpuCrashDiagnosticsOptIn",gpuDiagnostics}};
 }
 void saveSettings(){
@@ -635,6 +614,8 @@ void loadSettings(){
     int percent=GetPrivateProfileIntW(L"launcher",L"renderScalePercent",scale>=0&&scale<=5?50+scale*10:100,ini.c_str());
     SendMessageW(renderScale,CB_SETCURSEL,(std::clamp(percent,40,200)-40+2)/5,0);
     for(const auto& setting:launcherChecks())setChecked(setting.second,GetPrivateProfileIntW(L"launcher",setting.first.c_str(),0,ini.c_str())!=0);
+    if(!framegenAvailable)setChecked(framegen2x,false);
+    if(isChecked(framegen2x))setChecked(fsr,false);
     wchar_t game[32768]{};GetPrivateProfileStringW(L"launcher",L"game",L"",game,32768,ini.c_str());
     if(game[0]&&validGameExecutable(game))SetWindowTextW(gameEdit,game);
     else SetWindowTextW(gameEdit,findGameExecutable().c_str());
@@ -785,8 +766,9 @@ void runLauncher(bool launch) {
     wchar_t scaleText[16]{};
     GetWindowTextW(renderScale, scaleText, 16);
     const double scale = steamVr ? 1.0 : std::clamp(_wtoi(scaleText) / 100.0, .4, 2.);
-    const bool useFsr = mode==1 && !steamVr && isChecked(fsr);
-    const double engineScale = useFsr && scale<1.0 ? 1.0 : scale;
+    const bool useFramegen=mode==1&&framegenAvailable&&isChecked(framegen2x);
+    const bool useFsr = mode==1 && !steamVr && !useFramegen && isChecked(fsr);
+    const double engineScale = useFramegen || (useFsr && scale<1.0) ? 1.0 : scale;
     wchar_t scaleEnv[32]{};
     swprintf_s(scaleEnv, L"%.2f", engineScale);
     std::map<std::wstring,std::wstring> env;
@@ -812,6 +794,10 @@ void runLauncher(bool launch) {
     if (steamVr) addSteamVrPathEnvironment(env, runtimeManifest);
     env[L"ARGENT_RENDER_SCALE"] = scaleEnv;
     env[L"ARGENT_FSR1"] = useFsr ? L"1" : L"0";
+    env[L"ARGENT_FRAMEGEN_2X"]=useFramegen?L"1":L"0";
+    env[L"ARGENT_FG_DIRECTORY"]=(root/L"framegen").wstring();
+    env[L"ARGENT_FG_COMMUNITY"]=L"1";
+    if(log&&useFramegen)log<<L"Native DLSS-G 2X requested. Native-resolution and DLSS inputs supported. External OFXR takes priority if loaded.\n";
     configureStereoDlss(env,mode);
     if(log&&mode==1)log<<L"Stereo DLSS: independent eye histories enabled; engine selection is respected when FSR 1 is off.\n";
     const bool performanceDiagnostics=!cleanRelease&&std::filesystem::exists(root/L"assets/performance-diagnostics.cfg");
@@ -860,8 +846,9 @@ void runLauncher(bool launch) {
                 fail(L"VR diagnostics failed. Connect the headset and start its OpenXR runtime.");
                 return;
             }
-            const auto resolution=argent::renderResolution(uint32_t(eyeWidth),uint32_t(eyeHeight),float(scale),useFsr);
+            const auto resolution=argent::renderResolution(uint32_t(eyeWidth),uint32_t(eyeHeight),float(scale),useFsr,useFramegen);
             if(log)log<<L"Render source: "<<resolution.sourceWidth<<L"x"<<resolution.sourceHeight<<L"; headset: "<<eyeWidth<<L"x"<<eyeHeight<<L"; engine scale: "<<engineScale<<L"; FSR upscale: "<<resolution.fsrUpscale<<L"\n";
+            if(log&&useFramegen)log<<L"DLSS-G resolution: RenderScale "<<int(scale*100+.5)<<L"% controls eye output pixels; DLSS input quality remains selected in DOOM. Applies on game restart.\n";
             eyeWidth=int(resolution.sourceWidth);eyeHeight=int(resolution.sourceHeight);
             env[L"ARGENT_SFS_SOURCE_RING"] = L"1";
             env[L"ARGENT_EYE_WIDTH"] = std::to_wstring(eyeWidth);
@@ -1019,6 +1006,9 @@ void createTabs(HWND hwnd) {
     fsr=addCheck(tabPages[0],L"FSR Upscaling",450,16,315,32,IdFsr);
     disableVrIntro=addCheck(tabPages[0],L"Disable VR Intro",395,98,330,32,IdDisableVrIntro);
     ShowWindow(disableVrIntro,SW_HIDE);
+    framegenAvailable=framegenAdapterAvailable();
+    framegen2x=addCheck(tabPages[0],L"DLSS-G FrameGen 2x",395,138,360,32,IdFramegen);
+    ShowWindow(framegen2x,framegenAvailable?SW_SHOW:SW_HIDE);
     cinematics3d=addCheck(tabPages[0],L"3D Cinematics",24,98,330,32,IdCinematics3d);
     renderingLogging=addCheck(tabPages[0],L"Extended Logging",24,138,330,32,IdRenderingLogging);
     desktopMirror=addCheck(tabPages[0],L"Desktop Mirror (Right Eye)",24,178,360,32,IdDesktopMirror);
@@ -1113,8 +1103,12 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         createTabs(hwnd);
         loadSettings();
         updateRenderingAvailability(usesSteamVrRuntime());
+        constexpr int actionTop=614, actionHeight=48;
         launchButton = addControl(hwnd, L"BUTTON", L"PLAY", BS_OWNERDRAW | WS_TABSTOP,
-            350, 614, 200, 48, IdLaunch);
+            350, actionTop, 200, actionHeight, IdLaunch);
+        const int kofiWidth=kofiImage&&kofiImage->GetLastStatus()==Gdiplus::Ok&&kofiImage->GetHeight()
+            ? MulDiv(actionHeight,int(kofiImage->GetWidth()),int(kofiImage->GetHeight())) : 91;
+        addControl(hwnd,L"BUTTON",L"Support me on Ko-fi",BS_OWNERDRAW|WS_TABSTOP,42,actionTop,kofiWidth,actionHeight,IdKofi);
         statusText = addLabel(hwnd, L"Ready", 42, 676, 635, 28, true);
         addControl(hwnd,L"BUTTON",L"Made by Cactus",BS_OWNERDRAW|WS_TABSTOP,700,676,158,28,IdCredit);
         settingsReady=true;
@@ -1170,6 +1164,11 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 }
                 return TRUE;
             }
+            if(controlId==IdKofi){
+                FillRect(dis->hDC,&dis->rcItem,backgroundBrush);
+                if(kofiImage&&kofiImage->GetLastStatus()==Gdiplus::Ok){Gdiplus::Graphics g(dis->hDC);g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);g.DrawImage(kofiImage,Gdiplus::Rect(dis->rcItem.left,dis->rcItem.top,dis->rcItem.right-dis->rcItem.left,dis->rcItem.bottom-dis->rcItem.top));}
+                if(dis->itemState&ODS_FOCUS)DrawFocusRect(dis->hDC,&dis->rcItem);return TRUE;
+            }
             if(controlId==IdCredit){FillRect(dis->hDC,&dis->rcItem,backgroundBrush);SetBkMode(dis->hDC,TRANSPARENT);SetTextColor(dis->hDC,Muted);DrawTextW(dis->hDC,label,-1,&dis->rcItem,DT_RIGHT|DT_VCENTER|DT_SINGLELINE);if(dis->itemState&ODS_FOCUS)DrawFocusRect(dis->hDC,&dis->rcItem);return TRUE;}
             const bool check = dis->hwndItem == disableAa || dis->hwndItem == captureShaders ||
                 dis->hwndItem == simulator || extraCheck(dis->hwndItem);
@@ -1215,6 +1214,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_COMMAND:
         if(introThreadId)return 0;
+        if(LOWORD(wp)==IdKofi){if(HIWORD(wp)==BN_CLICKED)ShellExecuteW(hwnd,L"open",L"https://ko-fi.com/cactusvrstudios/tip",nullptr,nullptr,SW_SHOWNORMAL);return 0;}
         if(LOWORD(wp)==IdCredit){if(HIWORD(wp)==BN_CLICKED&&(GetKeyState(VK_SHIFT)&0x8000))layoutTabs(!advancedTabs);return 0;}
         if (LOWORD(wp) >= IdTabBase && LOWORD(wp) < IdTabBase + 7) {
             showTab(LOWORD(wp) - IdTabBase);
@@ -1237,6 +1237,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (check) {
                 setChecked(control,!isChecked(control));
                 if(control==dominantHand)updateLeftHandLayout();
+                if(control==framegen2x){if(isChecked(framegen2x))setChecked(fsr,false);updateRenderingAvailability(usesSteamVrRuntime());setStatus(isChecked(framegen2x)?L"DLSS-G 2X: DLSS on or off. Experimental; applies on next start.":L"DLSS-G 2X disabled; applies on next start.");}
                 InvalidateRect(control, nullptr, TRUE);
                 autoSaveSettings();
                 return 0;
@@ -1317,6 +1318,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (worker) CloseHandle(worker);
         delete controllerBindingImage;
         delete logo;
+        delete kofiImage;
         if (uiFont) DeleteObject(uiFont);
         if (titleFont) DeleteObject(titleFont);
         if (backgroundBrush) DeleteObject(backgroundBrush);
@@ -1350,6 +1352,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR arguments, int show) {
 
     Gdiplus::GdiplusStartupInput gdiplusInput;
     Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusInput, nullptr);
+    auto kofiPath=root/L"assets/kofi-support.png";
+    if(!std::filesystem::exists(kofiPath))kofiPath=std::filesystem::path(__FILE__).parent_path().parent_path()/L"assets/kofi-support.png";
+    if(std::filesystem::exists(kofiPath))kofiImage=Gdiplus::Image::FromFile(kofiPath.c_str(),FALSE);
     auto logoPath = root / L"assets" / L"kharvox-argent-logo.png";
     if (!std::filesystem::exists(logoPath)) logoPath = root.parent_path() / L"assets" / L"kharvox-argent-logo.png";
     if (std::filesystem::exists(logoPath)) logo = Gdiplus::Image::FromFile(logoPath.c_str(), FALSE);
@@ -1442,6 +1447,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR arguments, int show) {
              output.Save((std::filesystem::current_path()/(i?L"launcher-instructions-preview.png":L"launcher-bindings-preview.png")).c_str(),&encoder,nullptr);}
             SelectObject(memory,old);DeleteObject(bitmap);DeleteDC(memory);ReleaseDC(hwnd,dc);
         }
+        require(GetParent(framegen2x)==tabPages[0]&&!isChecked(framegen2x));
+        require(bool(GetWindowLongPtrW(framegen2x,GWL_STYLE)&WS_VISIBLE)==framegenAvailable);
+        RECT fgRect{},introRect{};GetWindowRect(framegen2x,&fgRect);GetWindowRect(disableVrIntro,&introRect);require(fgRect.left==introRect.left&&fgRect.top>=introRect.bottom);
+        if(framegenAvailable){
+         setChecked(fsr,true);SendMessageW(hwnd,WM_COMMAND,MAKEWPARAM(IdFramegen,BN_CLICKED),reinterpret_cast<LPARAM>(framegen2x));require(isChecked(framegen2x)&&!isChecked(fsr)&&!IsWindowEnabled(fsr));
+         saveSettings();setChecked(framegen2x,false);loadSettings();require(isChecked(framegen2x));
+         SendMessageW(hwnd,WM_COMMAND,MAKEWPARAM(IdFramegen,BN_CLICKED),reinterpret_cast<LPARAM>(framegen2x));require(!isChecked(framegen2x));saveSettings();
+        }
+        updateRenderingAvailability(false); // Restore this test's non-SteamVR UI fixture.
         require(GetParent(desktopMirror)==tabPages[0]&&!isChecked(desktopMirror));
         SendMessageW(hwnd,WM_COMMAND,MAKEWPARAM(IdDesktopMirror,BN_CLICKED),reinterpret_cast<LPARAM>(desktopMirror));require(isChecked(desktopMirror));
         SendMessageW(mirrorResolution,CB_SETCURSEL,3,0);
@@ -1650,16 +1664,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR arguments, int show) {
         MessageBoxW(hwnd,
             L"Linux is not supported! Give it a try but Windows 11 or Temple OS is recommended!",
             L"ARGENT - Compatibility notice", MB_OK | MB_ICONINFORMATION);
-    }
-    if (hardwareGpuSchedulingEnabled()) {
-        MessageBoxW(hwnd,
-            L"Hardware-accelerated GPU scheduling (HAGS) is enabled.\n\n"
-            L"We recommend turning it off when playing ARGENT.\n\n"
-            L"Open Windows Settings > System > Display > Graphics and turn off "
-            L"Hardware-accelerated GPU scheduling in the default or advanced graphics settings. "
-            L"Restart your PC for the change to take effect.\n\n"
-            L"You can continue using ARGENT with HAGS enabled.",
-            L"ARGENT - GPU scheduling recommendation", MB_OK | MB_ICONINFORMATION);
     }
 
     MSG msg{};
